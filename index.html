@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Under the Tree</title>
+  </head>
+  <body>
+    <!--
+      We keep a CSS-only fallback/placeholder layer so we can:
+      - show a blurred 2k image while WebGL assets load
+      - degrade gracefully if WebGL is unavailable
+    -->
+    <div id="fallback" aria-hidden="true"></div>
+
+    <!-- WebGL canvas will be injected here -->
+    <div id="app"></div>
+
+    <!-- UI overlays are HTML above the canvas (accessibility + iteration speed) -->
+    <div id="ui"></div>
+
+    <script type="module" src="/src/entry.js"></script>
+  </body>
+</html>

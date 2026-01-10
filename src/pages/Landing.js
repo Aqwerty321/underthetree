@@ -1,0 +1,808 @@
+// src/pages/Landing.js
+// Orchestrates landing -> cinematic -> gift parallax -> gift opening -> reveal.
+
+import { config } from '../config.js';
+import { loadManifest, loadGiftSceneTextures } from '../utils/assetLoader.js';
+import { withTimeout } from '../utils/syncUtils.js';
+import { HeroRenderer } from '../scene/HeroRenderer.js';
+import { GiftParallaxRenderer } from '../three/GiftParallaxRenderer.js';
+import { Soundscape } from '../audio/Soundscape.js';
+import { StartOverlay } from '../ui/StartOverlay.js';
+import { DebugPanel } from '../ui/DebugPanel.js';
+import { HeroCard } from '../ui/HeroCard.js';
+import { GiftOverlay } from '../ui/GiftOverlay.js';
+import { CinematicPlayer } from '../components/CinematicPlayer.js';
+import { VideoLayerManager } from '../video/VideoLayerManager.js';
+import { Telemetry } from '../utils/telemetry.js';
+import { PendingQueue } from '../utils/pendingQueue.js';
+import { ModelClient } from '../model/modelClient.js';
+import { SupabaseClientWrapper } from '../db/supabaseClient.js';
+import { WishModal } from '../ui/wish/WishModal.js';
+import { PendingIndicator } from '../ui/wish/PendingIndicator.js';
+import { PersistentQueueToast } from '../ui/wish/PersistentQueueToast.js';
+
+function clamp(v, lo, hi) {
+  return Math.min(hi, Math.max(lo, v));
+}
+
+function lerp(a, b, t) {
+  return a + (b - a) * t;
+}
+
+function makeCubicBezier(p1x, p1y, p2x, p2y) {
+  const cx = 3 * p1x;
+  const bx = 3 * (p2x - p1x) - cx;
+  const ax = 1 - cx - bx;
+
+  const cy = 3 * p1y;
+  const by = 3 * (p2y - p1y) - cy;
+  const ay = 1 - cy - by;
+
+  const sampleCurveX = (t) => ((ax * t + bx) * t + cx) * t;
+  const sampleCurveY = (t) => ((ay * t + by) * t + cy) * t;
+  const sampleCurveDerivativeX = (t) => (3 * ax * t + 2 * bx) * t + cx;
+
+  const solveCurveX = (x) => {
+    let t = x;
+    for (let i = 0; i < 8; i++) {
+      const x2 = sampleCurveX(t) - x;
+      const d2 = sampleCurveDerivativeX(t);
+      if (Math.abs(x2) < 1e-6) return t;
+      if (Math.abs(d2) < 1e-6) break;
+      t = t - x2 / d2;
+    }
+
+    let t0 = 0;
+    let t1 = 1;
+    t = x;
+    while (t0 < t1) {
+      const x2 = sampleCurveX(t);
+      if (Math.abs(x2 - x) < 1e-6) return t;
+      if (x > x2) t0 = t;
+      else t1 = t;
+      t = (t1 - t0) * 0.5 + t0;
+    }
+    return t;
+  };
+
+  return (x) => {
+    const t = solveCurveX(clamp(x, 0, 1));
+    return sampleCurveY(t);
+  };
+}
+
+function parseBezierString(str) {
+  const m = /cubic-bezier\(([^)]+)\)/.exec(str);
+  if (!m) return (t) => t;
+  const [a, b, c, d] = m[1]
+    .split(',')
+    .map((s) => Number(s.trim()))
+    .map((n) => (Number.isFinite(n) ? n : 0));
+  return makeCubicBezier(a, b, c, d);
+}
+
+function transitionOpacity(el, to, ms, easing) {
+  return new Promise((resolve) => {
+    const done = () => {
+      el.removeEventListener('transitionend', done);
+      resolve();
+    };
+    el.addEventListener('transitionend', done);
+    el.style.transition = `opacity ${ms}ms ${easing}`;
+    void el.offsetWidth;
+    el.style.opacity = String(to);
+    setTimeout(done, ms + 50);
+  });
+}
+
+function ensureBottomLoader(parent) {
+  const wrap = document.createElement('div');
+  wrap.className = 'utt-loading utt-visible';
+  wrap.style.opacity = '1';
+
+  const bar = document.createElement('div');
+  bar.className = 'utt-bar';
+
+  const fill = document.createElement('div');
+  fill.className = 'utt-bar-fill';
+
+  bar.appendChild(fill);
+
+  const pct = document.createElement('div');
+  pct.className = 'utt-pct';
+  pct.textContent = '0%';
+
+  wrap.appendChild(bar);
+  wrap.appendChild(pct);
+
+  parent.appendChild(wrap);
+
+  return {
+    el: wrap,
+    setProgress(p) {
+      const x = clamp(p ?? 0, 0, 1);
+      fill.style.transform = `scaleX(${x})`;
+      pct.textContent = `${Math.round(x * 100)}%`;
+    },
+    setText(text) {
+      pct.textContent = String(text ?? '');
+    },
+    setShimmer(enabled) {
+      wrap.classList.toggle('utt-shimmer', Boolean(enabled));
+    },
+    remove() {
+      wrap.remove();
+    }
+  };
+}
+
+function ensureToast(parent) {
+  const el = document.createElement('div');
+  el.className = 'utt-toast utt-hidden';
+  parent.appendChild(el);
+
+  return {
+    show(msg) {
+      el.textContent = msg;
+      el.classList.remove('utt-hidden');
+      el.style.opacity = '1';
+      setTimeout(() => {
+        el.style.opacity = '0';
+        setTimeout(() => el.classList.add('utt-hidden'), 300);
+      }, 1600);
+    }
+  };
+}
+
+function safePauseResetVideo(videoEl) {
+  if (!videoEl) return;
+  try {
+    videoEl.pause();
+  } catch {
+    // ignore
+  }
+  try {
+    videoEl.currentTime = 0;
+  } catch {
+    // ignore
+  }
+  try {
+    videoEl.load();
+  } catch {
+    // ignore
+  }
+}
+
+export async function mountLanding() {
+  const appEl = document.getElementById('app');
+  const uiEl = document.getElementById('ui');
+
+  const url = new URL(window.location.href);
+  const debugEnabled = url.searchParams.get('debug') === 'true';
+
+  const osReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const persistedReducedMotion = window.localStorage.getItem(config.storageKeys.reducedMotion);
+  const userReducedMotion = persistedReducedMotion === 'true';
+
+  const runtime = {
+    started: false,
+    isLowPower: false,
+    prefersReducedMotion: osReducedMotion || userReducedMotion,
+    userReducedMotion,
+    muted: false,
+    progress: 0,
+    state: 'idle'
+  };
+
+  runtime.isLowPower = config.detectLowPower();
+
+  const persistedMute = window.localStorage.getItem(config.storageKeys.muted);
+  if (persistedMute != null) runtime.muted = persistedMute === 'true';
+
+  let heroRenderer = null;
+  let giftRenderer = null;
+  let soundscape = null;
+  let heroCard = null;
+  let giftOverlay = null;
+  let videoLayers = null;
+  let heroCardShowTimeoutId = null;
+
+  const telemetry = new Telemetry({ endpoint: import.meta.env.VITE_TELEMETRY_ENDPOINT || null });
+  const modelClient = new ModelClient({ telemetry });
+  const supabaseClient = new SupabaseClientWrapper({ telemetry });
+
+  let pendingQueue = null;
+  let pendingIndicator = null;
+  let persistentQueueToast = null;
+  let wishModal = null;
+
+  const cinematic = new CinematicPlayer({ parent: document.body, config, runtime, debugEnabled });
+
+  function ensureBlackout() {
+    if (cinematic.blackout) return cinematic.blackout;
+    const el = document.createElement('div');
+    el.className = 'utt-blackout utt-visible';
+    el.style.opacity = '0';
+    document.body.appendChild(el);
+    cinematic.blackout = el;
+    return el;
+  }
+
+  const toast = ensureToast(document.body);
+
+  const overlay = new StartOverlay({
+    parent: uiEl,
+    runtime,
+    copy: config.ui,
+    onToggleMute: (muted) => {
+      runtime.muted = muted;
+      window.localStorage.setItem(config.storageKeys.muted, String(muted));
+      soundscape?.setMuted(muted);
+    },
+    onInteractionFocusChange: (isFocused) => {
+      heroRenderer?.setInteractionFocus(isFocused);
+    },
+    onEnter: async () => {
+      await config.onEnter?.();
+    }
+  });
+
+  const manifest = loadManifest(config);
+
+  try {
+    const assets = await manifest.load({
+      onProgress: (p) => {
+        runtime.progress = p;
+        overlay.setProgress(p);
+      }
+    });
+
+    const canUseWebGL = HeroRenderer.canUseWebGL();
+    const allowWebGL = canUseWebGL && !runtime.isLowPower;
+
+    if (allowWebGL) {
+      heroRenderer = new HeroRenderer({ parent: appEl, config, runtime, assets });
+    } else {
+      document.body.classList.add('is-fallback');
+    }
+
+    soundscape = new Soundscape({ config, runtime });
+    await soundscape.preload(assets.audio);
+
+    overlay.setReady(true);
+
+    const uiLayer = document.createElement('div');
+    uiLayer.className = 'utt-ui-layer';
+    uiEl.appendChild(uiLayer);
+
+    const processPendingQueue = async ({ force = false } = {}) => {
+      const before = pendingQueue?.getCounts?.()?.total ?? 0;
+      await pendingQueue?.process?.({
+        force,
+        handlers: {
+          CREATE_WISH: async (payload) => supabaseClient.createWishFromQueue(payload),
+          SUBMIT_WISH: async (payload) => {
+            const user_id = payload?.user_id ?? null;
+            const text = String(payload?.text || '');
+            const is_public = Boolean(payload?.is_public);
+            const client_op_id = String(payload?.client_op_id || '');
+
+            if (!text.trim()) throw new Error('non_retryable:empty_text');
+            if (!client_op_id) throw new Error('non_retryable:missing_client_op_id');
+
+            const v = (await modelClient.request('VALIDATE_WISH', { text }, { timeoutMs: 10000, stream: false, clientOpId: client_op_id })).result;
+            if (!v.ok || !v.valid) {
+              const reason = Array.isArray(v.reasons) && v.reasons.length ? v.reasons.join('; ') : 'invalid';
+              throw new Error(`non_retryable:invalid_wish:${reason}`);
+            }
+
+            const wishText = v.sanitized_text || text;
+            const created = (await modelClient.request(
+              'CREATE_WISH_PAYLOAD',
+              { user_id, text: wishText, is_public },
+              { timeoutMs: 10000, stream: false, clientOpId: client_op_id }
+            )).result;
+
+            if (!created.ok) {
+              const code = created.error_code || 'MODEL_ERROR';
+              const msg = created.error_msg || 'Model rejected payload';
+              throw new Error(`non_retryable:${code}:${msg}`);
+            }
+
+            await supabaseClient.createWishFromQueue({ ...created.db_payload, id: client_op_id, synced: true });
+          }
+        }
+      });
+      const after = pendingQueue?.getCounts?.()?.total ?? 0;
+      const drained = Math.max(0, before - after);
+      if (drained > 0) toast.show(`Synced ${drained} wish${drained === 1 ? '' : 'es'}`);
+    };
+
+    // Pending queue + indicator (always mounted; hidden unless needed).
+    persistentQueueToast = new PersistentQueueToast({
+      parent: document.body,
+      queue: null,
+      onRetryAll: async () => {
+        await processPendingQueue({ force: true });
+      }
+    });
+
+    pendingQueue = new PendingQueue({
+      telemetry,
+      onChange: () => {
+        pendingIndicator?.update();
+      },
+      onItemFailed: (op) => {
+        // Persistent remediation required by spec.
+        persistentQueueToast?.showFor(op);
+      }
+    });
+
+    // Patch the toast's queue reference now that pendingQueue exists.
+    persistentQueueToast.queue = pendingQueue;
+
+    pendingIndicator = new PendingIndicator({
+      parent: uiLayer,
+      queue: pendingQueue,
+      onRetryAll: async () => {
+        await processPendingQueue({ force: true });
+      }
+    });
+
+    // Process queue on start and on reconnect.
+    processPendingQueue();
+    window.addEventListener('online', () => {
+      processPendingQueue();
+    });
+
+    // Wish modal
+    wishModal = new WishModal({
+      parent: document.body,
+      config,
+      runtime,
+      modelClient,
+      supabaseClient,
+      queue: pendingQueue,
+      telemetry,
+      toast
+    });
+
+    heroCard = new HeroCard({
+      parent: uiLayer,
+      title: config.ui.title,
+      subtitle: 'Open a present to begin.',
+      ctaLabel: 'Open a Present',
+      onPrimary: async () => {
+        await startCinematicFlow();
+      },
+      initialMuted: runtime.muted,
+      initialReducedMotion: runtime.userReducedMotion,
+      onMuteChange: (muted) => {
+        runtime.muted = muted;
+        window.localStorage.setItem(config.storageKeys.muted, String(muted));
+        soundscape?.setMuted(muted);
+      },
+      onReducedMotionChange: (enabled) => {
+        runtime.userReducedMotion = enabled;
+        window.localStorage.setItem(config.storageKeys.reducedMotion, String(enabled));
+        const osRM = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+        runtime.prefersReducedMotion = osRM || enabled;
+        heroRenderer?.syncFromConfig();
+      },
+      onCtaFocusChange: (isFocused) => {
+        heroRenderer?.setInteractionFocus(isFocused);
+      }
+    });
+    heroCard.setVisible(false);
+
+    overlay.onStart(async () => {
+      runtime.started = true;
+      runtime.state = 'idle';
+      document.body.classList.add('is-running');
+
+      heroRenderer?.start();
+      await soundscape.start();
+
+      if (runtime.prefersReducedMotion && config.accessibility.defaultAudioOffOnReducedMotion) {
+        runtime.muted = true;
+        window.localStorage.setItem(config.storageKeys.muted, 'true');
+        overlay.setMuted(true);
+        soundscape.setMuted(true);
+      } else {
+        soundscape.setMuted(runtime.muted);
+      }
+
+      const heroFadeEndSec = config.timeline?.heroFade?.end ?? 0;
+      const uiDelayMs = Math.max(0, (heroFadeEndSec + 0.25) * 1000);
+      if (heroCardShowTimeoutId) {
+        window.clearTimeout(heroCardShowTimeoutId);
+        heroCardShowTimeoutId = null;
+      }
+
+      heroCardShowTimeoutId = window.setTimeout(() => {
+        // Only show the home hero card if we are still on the home state.
+        if (runtime.state === 'idle') heroCard?.setVisible(true);
+      }, uiDelayMs);
+    });
+
+    if (debugEnabled) {
+      new DebugPanel({
+        parent: uiEl,
+        config,
+        runtime,
+        onChange: (patch) => {
+          config.applyDebugPatch(patch);
+          heroRenderer?.syncFromConfig();
+          giftRenderer?.syncFromConfig();
+          soundscape?.syncFromConfig();
+        }
+      });
+    }
+
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) {
+        heroRenderer?.pause();
+        giftRenderer?.pause();
+        soundscape?.pause();
+      } else {
+        heroRenderer?.resume();
+        giftRenderer?.resume();
+        soundscape?.resume();
+      }
+    });
+
+    async function startCinematicFlow() {
+      if (!runtime.started) return;
+      if (runtime.state !== 'idle') return;
+
+      runtime.state = 'cinematicLoading';
+
+      // Cancel any pending delayed hero-card reveal from Start.
+      if (heroCardShowTimeoutId) {
+        window.clearTimeout(heroCardShowTimeoutId);
+        heroCardShowTimeoutId = null;
+      }
+
+      heroCard?.setDisabled(true);
+      heroCard?.setVisible(false);
+      heroCard?.el?.classList.add('utt-hidden');
+      heroRenderer?.pause();
+
+      await cinematic.play();
+
+      runtime.state = 'loadingParallax';
+
+      // Load gift scene textures on black.
+      const loader = ensureBottomLoader(document.body);
+      try {
+        const giftTex = await loadGiftSceneTextures(config, {
+          onProgress: (p) => loader.setProgress(p)
+        });
+
+        // Create gift renderer using gift textures + existing noise.
+        giftRenderer = new GiftParallaxRenderer({
+          parent: appEl,
+          config,
+          runtime,
+          textures: {
+            color: giftTex.textures.color,
+            depth: giftTex.textures.depth,
+            noise: assets.textures.noise
+          },
+          enablePost: true
+        });
+        giftRenderer.setOpacity(0);
+        giftRenderer.setBlurRadiusPct(config.post.blur.loadingRadiusPct);
+        giftRenderer.start();
+
+        // Crossfade black -> gift scene and blur ramp.
+        const easeScene = parseBezierString(config.easing.easeOutCubic);
+        const easeBlur = parseBezierString(config.easing.blurRamp);
+
+        const fadeMs = (config.flow?.GIFT_SCENE_CROSSFADE ?? 0.6) * 1000;
+        const blurMs = 650;
+        const maxMs = Math.max(fadeMs, blurMs) + 1200;
+
+        const t0 = performance.now();
+        const crossfade = new Promise((resolve) => {
+          const step = () => {
+            try {
+              const now = performance.now();
+              const u = clamp((now - t0) / Math.max(1, fadeMs), 0, 1);
+              const b = clamp((now - t0) / Math.max(1, blurMs), 0, 1);
+
+              giftRenderer?.setOpacity(easeScene(u));
+              giftRenderer?.setBlurRadiusPct(
+                lerp(config.post.blur.loadingRadiusPct, config.post.blur.baseRadiusPct, easeBlur(b))
+              );
+
+              // Fade blackout out as scene fades in.
+              if (cinematic.blackout) {
+                cinematic.blackout.style.opacity = String(1 - easeScene(u));
+              }
+
+              if (u >= 1 && b >= 1) {
+                resolve();
+                return;
+              }
+              requestAnimationFrame(step);
+            } catch {
+              resolve();
+            }
+          };
+          requestAnimationFrame(step);
+        });
+
+        try {
+          await withTimeout(crossfade, maxMs, 'Gift scene crossfade timed out');
+        } catch {
+          // Fail-safe: show scene and clear blackout.
+          giftRenderer?.setOpacity(1);
+          giftRenderer?.setBlurRadiusPct(config.post.blur.baseRadiusPct);
+          if (cinematic.blackout) cinematic.blackout.style.opacity = '0';
+        }
+      } finally {
+        // Always remove loader even if something stalls.
+        try {
+          loader.remove();
+        } catch {
+          // ignore
+        }
+      }
+
+      runtime.state = 'parallaxShown';
+
+      // Show gift UI after +0.2s.
+      if (!giftOverlay) {
+        giftOverlay = new GiftOverlay({
+          parent: document.body,
+          config,
+          runtime,
+          initialMuted: runtime.muted,
+          onMuteChange: (muted) => {
+            runtime.muted = muted;
+            window.localStorage.setItem(config.storageKeys.muted, String(muted));
+            soundscape?.setMuted(muted);
+          },
+          onOpenGift: async () => {
+            await startGiftOpenFlow();
+          },
+          onMoreGifts: () => {
+            toast.show('No more gifts (not configured)');
+          },
+          onWriteWish: async () => {
+            await wishModal?.open();
+          },
+          onBackHome: async () => {
+            await returnToHome();
+          }
+        });
+      }
+
+      await giftOverlay.show({ delayMs: (config.flow?.GIFT_UI_DELAY_AFTER_SCENE ?? 0.2) * 1000 });
+      runtime.state = 'giftOverlayShown';
+
+      // Keep hero paused behind gift scene.
+    }
+
+    async function startGiftOpenFlow() {
+      if (runtime.state !== 'giftOverlayShown') return;
+      runtime.state = 'openingGift';
+
+      if (runtime.prefersReducedMotion) {
+        giftOverlay.setPreviewImage(config.assets.giftOverlay.giftOpenStatic);
+        giftOverlay.setDisabled(false);
+        giftOverlay.showReveal();
+        runtime.state = 'reveal';
+        return;
+      }
+
+      videoLayers =
+        videoLayers ??
+        new VideoLayerManager({
+          parent: giftOverlay.getConfettiMount(),
+          config,
+          runtime,
+          giftRenderer,
+          className: 'utt-video-layers'
+        });
+
+      try {
+        const giftVideoEl = giftOverlay.getGiftVideoElement();
+        const confettiEnded = await videoLayers.playConfettiSyncedToGift({ giftVideoEl });
+
+        runtime.state = 'confettiPlaying';
+
+        // Reveal once both: gift has reached its final frame, and confetti has ended.
+        await Promise.all([
+          giftOverlay.waitForGiftEnded().catch(() => {}),
+          confettiEnded.catch(() => {})
+        ]);
+
+        await videoLayers.fadeOutConfetti();
+
+        runtime.state = 'reveal';
+        giftOverlay.setDisabled(false);
+        giftOverlay.showReveal();
+      } catch {
+        // Fallback: show static open frame.
+        giftOverlay.setPreviewImage(config.assets.giftOverlay.giftOpenStatic);
+        giftOverlay.setDisabled(false);
+        giftOverlay.showReveal();
+        runtime.state = 'reveal';
+      }
+    }
+
+    async function returnToHome() {
+      if (runtime.state === 'returningHome') return;
+      runtime.state = 'returningHome';
+
+      // Prevent spam clicks while transitioning.
+      try {
+        giftOverlay?.setDisabled(true);
+      } catch {
+        // ignore
+      }
+
+      // Fade to black with a small loading indicator to hide teardown.
+      const blackout = ensureBlackout();
+      const loader = ensureBottomLoader(document.body);
+      loader.setShimmer(true);
+      loader.setProgress(0.12);
+      loader.setText('Loading');
+
+      const FADE_TO_BLACK_MS = 420;
+      const FADE_FROM_BLACK_MS = 520;
+      const RETURN_HOME_TIMEOUT_MS = 3800;
+
+      const finalizeHome = async () => {
+        // Restore hero UI state.
+        heroRenderer?.resume();
+        heroCard?.setDisabled(false);
+        heroCard?.el?.classList.remove('utt-hidden');
+        heroCard?.setMuted(runtime.muted);
+        heroCard?.setReducedMotion(runtime.userReducedMotion);
+
+        // Fade back in from black.
+        heroCard?.setVisible(false);
+        try {
+          await transitionOpacity(blackout, 0, FADE_FROM_BLACK_MS, config.easing.easeOutCubic);
+        } catch {
+          blackout.style.opacity = '0';
+        }
+
+        // Show home UI after fade.
+        heroCard?.setVisible(true);
+        runtime.state = 'idle';
+
+        // Cleanup blackout element to keep DOM tidy.
+        try {
+          blackout.remove();
+        } catch {
+          // ignore
+        }
+        cinematic.blackout = null;
+      };
+
+      try {
+        await withTimeout(
+          (async () => {
+            // Fade to black first (hides any teardown flashes).
+            try {
+              await transitionOpacity(blackout, 1, FADE_TO_BLACK_MS, config.easing.easeOutCubic);
+            } catch {
+              blackout.style.opacity = '1';
+            }
+
+            loader.setProgress(0.28);
+
+            // Stop any in-flight gift media right away.
+            try {
+              safePauseResetVideo(giftOverlay?.getGiftVideoElement?.());
+            } catch {
+              // ignore
+            }
+
+            // Tear down gift UI and layers while black.
+            try {
+              await giftOverlay?.hide();
+            } catch {
+              // ignore
+            }
+
+            loader.setProgress(0.55);
+
+            try {
+              giftOverlay?.destroy();
+            } catch {
+              // ignore
+            }
+            giftOverlay = null;
+
+            try {
+              videoLayers?.destroy();
+            } catch {
+              // ignore
+            }
+            videoLayers = null;
+
+            loader.setProgress(0.78);
+
+            try {
+              giftRenderer?.stop();
+            } catch {
+              // ignore
+            }
+            giftRenderer = null;
+
+            // Ensure soundscape matches current mute state.
+            try {
+              soundscape?.setMuted(runtime.muted);
+            } catch {
+              // ignore
+            }
+
+            loader.setProgress(0.92);
+
+            await finalizeHome();
+          })(),
+          RETURN_HOME_TIMEOUT_MS,
+          'Return-to-home transition timed out'
+        );
+      } catch {
+        // Fail-safe: force home visible even if something stalls.
+        try {
+          blackout.style.opacity = '1';
+        } catch {
+          // ignore
+        }
+
+        try {
+          giftOverlay?.destroy();
+        } catch {
+          // ignore
+        }
+        giftOverlay = null;
+
+        try {
+          videoLayers?.destroy();
+        } catch {
+          // ignore
+        }
+        videoLayers = null;
+
+        try {
+          giftRenderer?.stop();
+        } catch {
+          // ignore
+        }
+        giftRenderer = null;
+
+        await finalizeHome().catch(() => {});
+      } finally {
+        // Always remove loader even on failure.
+        try {
+          loader.remove();
+        } catch {
+          // ignore
+        }
+      }
+    }
+
+    window.__uttTeardown = async () => {
+      await soundscape?.stop();
+      heroRenderer?.stop();
+      giftRenderer?.stop();
+      overlay.destroy();
+      heroCard?.el?.remove();
+      giftOverlay?.destroy();
+      videoLayers?.destroy();
+      wishModal?.destroy();
+      pendingIndicator?.destroy();
+      persistentQueueToast?.destroy();
+    };
+  } catch (err) {
+    overlay.setError(String(err?.message ?? err));
+    console.error(err);
+  }
+}

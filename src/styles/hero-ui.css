@@ -1,0 +1,769 @@
+/* src/styles/hero-ui.css
+   Glassmorphism UI + cinematic transition overlay.
+   This file is intentionally self-contained so we can iterate UI without touching renderer code.
+*/
+
+:root {
+  --utt-easeOutQuad: cubic-bezier(.25,.46,.45,.94);
+  --utt-easeOutCubic: cubic-bezier(.215,.61,.355,1);
+}
+
+.utt-ui-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  pointer-events: none;
+}
+
+.utt-hero-card {
+  pointer-events: auto;
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%) translateY(-4px);
+  width: min(86vw, 720px);
+  max-width: 720px;
+  padding: 28px 30px;
+  border-radius: 24px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.02),
+    0 14px 40px rgba(0, 0, 0, 0.45);
+  opacity: 1;
+  text-align: center;
+  transition:
+    opacity 500ms var(--utt-easeOutQuad),
+    transform 600ms var(--utt-easeOutCubic);
+}
+
+.utt-hero-card.utt-hero-hidden {
+  opacity: 0;
+  pointer-events: none;
+  transform: translate(-50%, -50%) translateY(10px);
+}
+
+/* Backdrop-filter, only when supported */
+@supports ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .utt-hero-card {
+    -webkit-backdrop-filter: blur(8px) saturate(120%);
+    backdrop-filter: blur(8px) saturate(120%);
+  }
+
+  .utt-hero-card.utt-cta-focus {
+    -webkit-backdrop-filter: blur(4px) saturate(120%);
+    backdrop-filter: blur(4px) saturate(120%);
+    transition:
+      opacity 500ms var(--utt-easeOutQuad),
+      transform 600ms var(--utt-easeOutCubic),
+      -webkit-backdrop-filter 250ms var(--utt-easeOutCubic),
+      backdrop-filter 250ms var(--utt-easeOutCubic);
+  }
+}
+
+.utt-hero-card::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 24px;
+  background-image: url('/assets/visuals/ui/glass_noise.jpg');
+  background-repeat: repeat;
+  background-size: 220px 220px;
+  opacity: 0.12; /* card-level noise opacity (spec: 0.12) */
+  mix-blend-mode: overlay;
+  pointer-events: none;
+}
+
+.utt-hero-card > * {
+  position: relative;
+}
+
+.utt-hero-title {
+  margin: 0 0 10px;
+  font-size: 52px;
+  line-height: 1.05;
+  font-weight: 700;
+  color: rgba(255, 255, 255, 0.96);
+}
+
+.utt-hero-subtitle {
+  margin: 0 0 18px;
+  font-size: 26px;
+  line-height: 1.5;
+  color: rgba(255, 255, 255, 0.78);
+}
+
+.utt-hero-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  margin-top: 16px;
+}
+
+.utt-hero-cta-row {
+  display: flex;
+  justify-content: center;
+  width: 100%;
+}
+
+.utt-hero-controls-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+}
+
+.utt-glass-btn {
+  appearance: none;
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(255, 255, 255, 0.95);
+  cursor: pointer;
+}
+
+.utt-glass-btn:focus-visible {
+  outline: 2px solid rgba(255, 255, 255, 0.28);
+  outline-offset: 2px;
+}
+
+/* Primary CTA (pill) */
+.utt-cta {
+  height: 66px;
+  padding: 0 36px;
+  border-radius: 999px;
+  font-size: 24px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  background:
+    linear-gradient(90deg, rgba(255, 210, 140, 0.12), rgba(255, 160, 90, 0.10)),
+    rgba(255, 255, 255, 0.06);
+  transition: transform 180ms var(--utt-easeOutCubic);
+}
+
+.utt-cta:hover {
+  transform: scale(1.02);
+}
+
+.utt-cta:active {
+  transform: scale(0.99);
+}
+
+.utt-cta .utt-cta-icon {
+  display: inline-block;
+  margin-left: 10px;
+  transform: translateX(0);
+  transition: transform 120ms var(--utt-easeOutCubic);
+}
+
+.utt-cta:hover .utt-cta-icon {
+  transform: translateX(2px);
+}
+
+/* Icon buttons */
+.utt-icon-btn {
+  width: 36px;
+  height: 36px;
+  border-radius: 999px;
+  display: inline-grid;
+  place-items: center;
+  background: rgba(255, 255, 255, 0.04);
+  transition: transform 160ms var(--utt-easeOutCubic);
+  font-size: 14px;
+}
+
+.utt-icon-btn:hover {
+  transform: scale(1.04);
+}
+
+.utt-icon-btn:active {
+  transform: scale(0.98);
+}
+
+.utt-tooltip {
+  position: absolute;
+  translate: 0 0;
+  opacity: 0;
+  pointer-events: none;
+  background: rgba(0, 0, 0, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 10px;
+  padding: 6px 8px;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.92);
+  transition: opacity 120ms linear;
+}
+
+.utt-tooltip-wrap {
+  position: relative;
+}
+
+.utt-tooltip-wrap:hover .utt-tooltip,
+.utt-tooltip-wrap:focus-within .utt-tooltip {
+  opacity: 1;
+}
+
+.utt-tooltip {
+  left: 50%;
+  bottom: calc(100% + 8px);
+  transform: translateX(-50%);
+  white-space: nowrap;
+}
+
+/* Transition overlay */
+.utt-blackout {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  background: #000;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.utt-blackout.utt-visible {
+  opacity: 1;
+}
+
+.utt-video {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  z-index: 45;
+  opacity: 0;
+  will-change: opacity;
+  transform: translateZ(0);
+  pointer-events: none;
+}
+
+/* Alpha video layers (DOM fallback) */
+.utt-video-layers {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+}
+
+.utt-alpha-video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  pointer-events: none;
+  will-change: opacity, transform;
+  transform: translateZ(0);
+}
+
+/* Note: per-scene z-index is handled by the parent stack (e.g. gift overlay). */
+
+/* Gift scene overlay UI */
+.utt-gift-ui {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+}
+
+.utt-gift-ui.utt-visible {
+  pointer-events: auto;
+}
+
+.utt-gift-card {
+  pointer-events: auto;
+  width: min(66.666vw, 980px);
+  height: min(66.666vh, 760px);
+  padding: 26px 28px;
+  border-radius: 24px;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-start;
+  position: relative;
+  overflow: visible;
+}
+
+.utt-gift-glass {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.02),
+    0 14px 40px rgba(0, 0, 0, 0.45);
+  z-index: 0;
+  pointer-events: none;
+}
+
+@supports ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .utt-gift-glass {
+    -webkit-backdrop-filter: blur(8px) saturate(120%);
+    backdrop-filter: blur(8px) saturate(120%);
+  }
+}
+
+/* Fullscreen confetti layer: above glass (not blurred), below gift content. */
+.utt-gift-confetti {
+  position: fixed;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+}
+
+.utt-gift-content {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: visible;
+}
+
+.utt-gift-title {
+  margin: 0 0 8px;
+  font-size: 34px;
+  line-height: 1.1;
+  font-weight: 700;
+  color: rgba(255, 255, 255, 0.96);
+}
+
+.utt-gift-subtitle {
+  margin: 0 0 16px;
+  font-size: 18px;
+  line-height: 1.5;
+  color: rgba(255, 255, 255, 0.78);
+}
+
+.utt-gift-preview {
+  flex: 1;
+  display: grid;
+  place-items: center;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  margin: 0 auto 16px;
+  cursor: pointer;
+  width: 100%;
+  min-height: 0;
+  position: relative;
+  overflow: visible;
+}
+
+.utt-gift-video {
+  width: 100%;
+  height: 100%;
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  display: block;
+  background: transparent;
+}
+
+.utt-gift-open-overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  pointer-events: none;
+  will-change: opacity;
+}
+
+.utt-gift-img {
+  width: 100%;
+  height: 100%;
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  display: block;
+}
+
+.utt-gift-action-slot {
+  position: relative;
+  width: 100%;
+  /* Keep this stable so swapping actions never resizes the preview area. */
+  min-height: 72px;
+}
+
+.utt-gift-actions,
+.utt-gift-reveal-actions {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 14px;
+  transition: opacity 240ms var(--utt-easeOutCubic);
+}
+
+.utt-action-hidden {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.utt-pill {
+  height: 46px;
+  padding: 0 18px;
+  border-radius: 999px;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.utt-toast {
+  position: fixed;
+  left: 50%;
+  bottom: 3vh;
+  transform: translateX(-50%);
+  z-index: 80;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: rgba(255, 255, 255, 0.92);
+  font-size: 13px;
+  line-height: 1.4;
+  transition: opacity 300ms var(--utt-easeOutCubic);
+}
+
+.utt-video.utt-visible {
+  opacity: 1;
+}
+
+.utt-loading {
+  position: fixed;
+  left: 50%;
+  bottom: 5.5vh;
+  transform: translateX(-50%);
+  z-index: 50;
+  width: min(60vw, 1200px);
+  min-width: 320px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  opacity: 0;
+  pointer-events: auto;
+}
+
+.utt-loading.utt-visible {
+  opacity: 1;
+  transition: opacity 240ms var(--utt-easeOutCubic);
+}
+
+.utt-bar {
+  position: relative;
+  height: 8px;
+  flex: 1;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  overflow: hidden;
+}
+
+.utt-bar-fill {
+  position: absolute;
+  inset: 0;
+  transform-origin: left center;
+  transform: scaleX(0);
+  background: #ffd1a6;
+  box-shadow: 0 0 12px rgba(255, 209, 166, 0.22);
+}
+
+.utt-bar-fill::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.22), transparent);
+  transform: translateX(-70%);
+  opacity: 0.55;
+}
+
+@keyframes uttShimmer {
+  0% { transform: translateX(-70%); }
+  100% { transform: translateX(140%); }
+}
+
+.utt-loading.utt-shimmer .utt-bar-fill::after {
+  animation: uttShimmer 1.25s linear infinite;
+}
+
+.utt-pct {
+  width: 44px;
+  text-align: right;
+  font-size: 13px;
+  opacity: 0.65;
+  color: rgba(255, 255, 255, 0.85);
+}
+
+.utt-retry {
+  margin-left: 10px;
+  display: flex;
+  gap: 10px;
+}
+
+.utt-hidden {
+  display: none !important;
+}
+
+/* --- Wish modal (glass) --- */
+.utt-wish-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.55);
+  z-index: 90;
+}
+
+.utt-wish-modal-backdrop.utt-visible {
+  display: flex;
+}
+
+.utt-wish-modal {
+  width: min(560px, calc(100vw - 28px));
+  border-radius: 22px;
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  background: rgba(18, 18, 18, 0.62);
+  -webkit-backdrop-filter: blur(18px);
+  backdrop-filter: blur(18px);
+  box-shadow: 0 20px 70px rgba(0,0,0,0.40);
+  overflow: hidden;
+}
+
+.utt-wish-progress {
+  height: 8px;
+  background: rgba(255,255,255,0.05);
+  border-bottom: 1px solid rgba(255,255,255,0.08);
+  overflow: hidden;
+}
+
+.utt-wish-progress-fill {
+  height: 100%;
+  transform-origin: left center;
+  transform: scaleX(0);
+  background: #ffd1a6;
+  box-shadow: 0 0 12px rgba(255, 209, 166, 0.22);
+}
+
+.utt-wish-progress[data-mode="hidden"] {
+  opacity: 0;
+}
+
+.utt-wish-progress[data-mode="indeterminate"] {
+  opacity: 1;
+}
+
+.utt-wish-progress[data-mode="determinate"] {
+  opacity: 1;
+}
+
+.utt-wish-progress[data-mode="success"] {
+  opacity: 1;
+}
+
+.utt-wish-progress[data-mode="indeterminate"] .utt-wish-progress-fill {
+  width: 32%;
+  transform: translateX(-40%);
+  animation: uttWishIndeterminate 1.2s linear infinite;
+}
+
+@keyframes uttWishIndeterminate {
+  0% { transform: translateX(-40%); }
+  100% { transform: translateX(360%); }
+}
+
+.utt-wish-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 16px 10px 16px;
+}
+
+.utt-wish-title {
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+}
+
+.utt-wish-header-right {
+  display: flex;
+  gap: 10px;
+}
+
+.utt-wish-body {
+  padding: 0 16px 14px 16px;
+}
+
+.utt-wish-status {
+  font-size: 13px;
+  opacity: 0.85;
+  min-height: 18px;
+  margin-bottom: 10px;
+}
+
+.utt-wish-textarea {
+  width: 100%;
+  min-height: 118px;
+  resize: none;
+  padding: 12px 12px;
+  border-radius: 14px;
+  border: 1px solid rgba(255,255,255,0.10);
+  background: rgba(255,255,255,0.04);
+  color: rgba(255,255,255,0.92);
+  outline: none;
+}
+
+.utt-wish-textarea.utt-invalid {
+  border-color: rgba(255, 120, 120, 0.55);
+}
+
+.utt-wish-public-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+  font-size: 13px;
+  opacity: 0.9;
+}
+
+.utt-wish-error {
+  white-space: pre-line;
+  margin-top: 10px;
+  font-size: 13px;
+  color: rgba(255, 170, 170, 0.95);
+}
+
+.utt-wish-footer {
+  padding: 14px 16px 16px 16px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.utt-wish-retry-row {
+  display: flex;
+  gap: 10px;
+}
+
+/* Pending indicator */
+.utt-pending-indicator {
+  position: fixed;
+  left: 14px;
+  bottom: 14px;
+  z-index: 55;
+}
+
+.utt-pending-label {
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  background: rgba(18, 18, 18, 0.55);
+  -webkit-backdrop-filter: blur(16px);
+  backdrop-filter: blur(16px);
+  border-radius: 999px;
+  padding: 8px 12px;
+  color: rgba(255,255,255,0.92);
+  font-size: 13px;
+}
+
+.utt-pending-panel {
+  margin-top: 10px;
+  width: min(520px, calc(100vw - 28px));
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  background: rgba(18, 18, 18, 0.60);
+  -webkit-backdrop-filter: blur(18px);
+  backdrop-filter: blur(18px);
+  padding: 12px;
+}
+
+.utt-pending-panel-title {
+  font-weight: 600;
+  margin-bottom: 10px;
+}
+
+.utt-pending-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 260px;
+  overflow: auto;
+}
+
+.utt-pending-item {
+  padding: 10px;
+  border-radius: 12px;
+  border: 1px solid rgba(255,255,255,0.08);
+  background: rgba(255,255,255,0.03);
+}
+
+.utt-pending-meta {
+  font-size: 12px;
+  opacity: 0.8;
+}
+
+.utt-pending-preview {
+  margin-top: 6px;
+  font-size: 13px;
+  opacity: 0.92;
+}
+
+.utt-pending-row-actions {
+  margin-top: 10px;
+  display: flex;
+  gap: 10px;
+}
+
+.utt-pending-actions {
+  margin-top: 12px;
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+}
+
+/* Persistent toast for failed items */
+.utt-persist-toast {
+  position: fixed;
+  left: 50%;
+  bottom: 14px;
+  transform: translateX(-50%);
+  z-index: 58;
+  width: min(720px, calc(100vw - 28px));
+  border-radius: 16px;
+  border: 1px solid rgba(255,255,255,0.10);
+  background: rgba(18, 18, 18, 0.62);
+  -webkit-backdrop-filter: blur(18px);
+  backdrop-filter: blur(18px);
+  padding: 12px 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.utt-persist-toast-msg {
+  font-size: 13px;
+  opacity: 0.92;
+}
+
+.utt-persist-toast-actions {
+  display: flex;
+  gap: 10px;
+}
+
+/* Reduced motion: shorter transitions, no shimmer */
+@media (prefers-reduced-motion: reduce) {
+  .utt-cta,
+  .utt-icon-btn {
+    transition: none;
+  }
+
+  .utt-loading.utt-shimmer .utt-bar-fill::after {
+    animation: none;
+  }
+}
