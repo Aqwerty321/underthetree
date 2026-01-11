@@ -510,6 +510,39 @@
   display: none !important;
 }
 
+/* --- Gift reward overlay --- */
+.utt-reward-backdrop {
+  position: fixed;
+  inset: 0;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.55);
+  z-index: 85;
+}
+
+.utt-reward-backdrop.utt-visible {
+  display: flex;
+}
+
+.utt-reward-card {
+  width: min(680px, calc(100vw - 28px));
+  border-radius: 22px;
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  background: rgba(18, 18, 18, 0.62);
+  -webkit-backdrop-filter: blur(18px);
+  backdrop-filter: blur(18px);
+  box-shadow: 0 20px 70px rgba(0,0,0,0.40);
+  padding: 26px 22px;
+  text-align: center;
+}
+
+.utt-reward-text {
+  font-size: 34px;
+  font-weight: 700;
+  color: rgba(255, 255, 255, 0.96);
+}
+
 /* --- Wish modal (glass) --- */
 .utt-wish-modal-backdrop {
   position: fixed;

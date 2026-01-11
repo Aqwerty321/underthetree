@@ -248,6 +248,14 @@ export class GiftOverlay {
     await transitionOpacity(this.backdrop, 1, 250, easing);
   }
 
+  async replayGiftOpen() {
+    // Used by the "More gifts" flow: return to idle then replay the open animation.
+    if (this._mode === 'reveal') {
+      await this.hideReveal();
+    }
+    await this._handleOpenGift();
+  }
+
   async _handleOpenGift() {
     if (this._mode !== 'idle') return;
     if (this.runtime?.prefersReducedMotion) return;

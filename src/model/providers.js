@@ -127,12 +127,14 @@ export async function callOllama({ operation, input, timeoutMs = 10000, stream =
 }
 
 export async function callToolhouse({ operation, input, timeoutMs = 10000, stream = false, onStreamChunk } = {}) {
-  // Toolhouse API details are intentionally configurable via env.
-  // Expect an OpenAI-compatible chat completions endpoint.
-  const endpoint = import.meta.env.VITE_TOOLHOUSE_URL;
-  const apiKey = import.meta.env.VITE_TOOLHOUSE_API_KEY;
+  // Toolhouse integration:
+  // - In production (Vercel), call our serverless proxy so API keys stay server-side.
+  // - In dev, allow direct calls if VITE_TOOLHOUSE_URL + VITE_TOOLHOUSE_API_KEY are provided.
+  const useProxy = Boolean(import.meta.env.PROD);
+  const endpoint = useProxy ? '/api/toolhouse-chat' : import.meta.env.VITE_TOOLHOUSE_URL;
+  const apiKey = useProxy ? null : import.meta.env.VITE_TOOLHOUSE_API_KEY;
 
-  if (!endpoint || !apiKey) {
+  if (!endpoint || (!useProxy && !apiKey)) {
     throw new ProviderError('Toolhouse not configured', { code: 'NOT_CONFIGURED', provider: 'toolhouse' });
   }
 
@@ -162,13 +164,17 @@ export async function callToolhouse({ operation, input, timeoutMs = 10000, strea
       method: 'POST',
       headers: {
         'content-type': 'application/json',
-        authorization: `Bearer ${apiKey}`
+        ...(useProxy ? {} : { authorization: `Bearer ${apiKey}` })
       },
       body: JSON.stringify(body),
       signal: controller.signal
     });
 
     if (!res.ok) {
+      // If we're using the proxy and Toolhouse isn't configured server-side, treat as NOT_CONFIGURED.
+      if (useProxy && res.status === 501) {
+        throw new ProviderError('Toolhouse not configured', { code: 'NOT_CONFIGURED', provider: 'toolhouse' });
+      }
       throw new ProviderError(`Toolhouse HTTP ${res.status}`, { code: 'HTTP', provider: 'toolhouse' });
     }
 

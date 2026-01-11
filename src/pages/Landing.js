@@ -20,6 +20,9 @@ import { SupabaseClientWrapper } from '../db/supabaseClient.js';
 import { WishModal } from '../ui/wish/WishModal.js';
 import { PendingIndicator } from '../ui/wish/PendingIndicator.js';
 import { PersistentQueueToast } from '../ui/wish/PersistentQueueToast.js';
+import { GiftRewardOverlay } from '../ui/GiftRewardOverlay.js';
+import { callToolhouseAgentPayload, ToolhouseAgentError } from '../toolhouse/agentClient.js';
+import { getOrCreateAnonUserId } from '../utils/anonUserId.js';
 
 function clamp(v, lo, hi) {
   return Math.min(hi, Math.max(lo, v));
@@ -215,6 +218,7 @@ export async function mountLanding() {
   let pendingIndicator = null;
   let persistentQueueToast = null;
   let wishModal = null;
+  let rewardOverlay = null;
 
   const cinematic = new CinematicPlayer({ parent: document.body, config, runtime, debugEnabled });
 
@@ -274,6 +278,8 @@ export async function mountLanding() {
     const uiLayer = document.createElement('div');
     uiLayer.className = 'utt-ui-layer';
     uiEl.appendChild(uiLayer);
+
+    rewardOverlay = new GiftRewardOverlay({ parent: document.body, config });
 
     const processPendingQueue = async ({ force = false } = {}) => {
       const before = pendingQueue?.getCounts?.()?.total ?? 0;
@@ -567,8 +573,81 @@ export async function mountLanding() {
           onOpenGift: async () => {
             await startGiftOpenFlow();
           },
-          onMoreGifts: () => {
-            toast.show('No more gifts (not configured)');
+          onMoreGifts: async () => {
+            if (runtime.state !== 'reveal') return;
+
+            // 1) Ask Toolhouse agent (linked to Supabase) to create a new gift + open record.
+            // The agent is expected to perform the CRUD operations using the Toolhouse→Supabase linker.
+            const user_id = getOrCreateAnonUserId();
+
+            let client_op_id = '';
+            try {
+              client_op_id = crypto.randomUUID();
+            } catch {
+              client_op_id = `op_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+            }
+
+            let lastSeenId = null;
+            try {
+              lastSeenId = await fetchLatestGiftOpenId({ user_id, supabaseClient });
+            } catch {
+              // ignore
+            }
+
+            giftOverlay.setDisabled(true);
+            toast.show('Looking for more gifts…');
+
+            try {
+              const raw = await callToolhouseAgentPayload({
+                command: 'OPEN_GIFT',
+                user_id,
+                client_op_id
+              });
+
+              // If the agent is configured to return JSON, surface structured errors.
+              // (We keep this tolerant because Toolhouse may stream text.)
+              try {
+                const parsed = JSON.parse(String(raw || ''));
+                if (parsed && parsed.ok === false) {
+                  const code = parsed?.error?.code || 'AGENT_ERROR';
+                  const msg = parsed?.error?.message || 'Agent returned ok=false';
+                  throw new Error(`agent:${code}:${msg}`);
+                }
+              } catch {
+                // Not JSON or not parseable; ignore.
+              }
+            } catch (e) {
+              giftOverlay.setDisabled(false);
+              if (e instanceof ToolhouseAgentError) {
+                if (e.code === 'NOT_CONFIGURED') toast.show('Toolhouse agent not configured (set TOOLHOUSE_AGENT_URL)');
+                else if (e.code === 'TIMEOUT') toast.show('Toolhouse agent timed out');
+                else if (e.code === 'NETWORK') toast.show('Network error contacting Toolhouse agent');
+                else toast.show('Toolhouse agent error');
+              } else if (typeof e?.message === 'string' && e.message.startsWith('agent:')) {
+                const parts = e.message.split(':');
+                const code = parts[1] || 'AGENT_ERROR';
+                const msg = parts.slice(2).join(':') || '';
+                toast.show(msg ? `Agent error (${code}): ${msg}` : `Agent error (${code})`);
+              } else {
+                toast.show('Could not get a gift right now');
+              }
+              return;
+            }
+
+            // 2) Replay the full gift opening animation.
+            runtime.state = 'giftOverlayShown';
+            await giftOverlay.replayGiftOpen();
+
+            // 3) After animation completes (reveal), poll Supabase for the new row and show the reward overlay.
+            try {
+              await waitForRuntimeState(runtime, 'reveal', 25000);
+              const giftTitle = await waitForNewGiftTitle({ user_id, supabaseClient, lastSeenId, timeoutMs: 20000 });
+              await rewardOverlay?.show?.(giftTitle || 'gift');
+            } catch {
+              // Best-effort: no reward.
+            } finally {
+              giftOverlay.setDisabled(false);
+            }
           },
           onWriteWish: async () => {
             await wishModal?.open();
@@ -787,6 +866,54 @@ export async function mountLanding() {
           // ignore
         }
       }
+    }
+
+    async function fetchLatestGiftOpenId({ user_id, supabaseClient }) {
+      if (!supabaseClient?.client) return null;
+      if (!user_id) return null;
+      const { data, error } = await supabaseClient.client
+        .from('user_gift_opens')
+        .select('id')
+        .eq('user_id', user_id)
+        .order('opened_at', { ascending: false })
+        .limit(1);
+      if (error) return null;
+      return data?.[0]?.id ?? null;
+    }
+
+    async function waitForNewGiftTitle({ user_id, supabaseClient, lastSeenId, timeoutMs = 15000 }) {
+      if (!supabaseClient?.client) throw new Error('supabase_not_configured');
+      if (!user_id) throw new Error('missing_user_id');
+
+      const start = performance.now();
+      while (performance.now() - start < timeoutMs) {
+        const { data, error } = await supabaseClient.client
+          .from('user_gift_opens')
+          .select('id, opened_at, gift_id, gifts(title)')
+          .eq('user_id', user_id)
+          .order('opened_at', { ascending: false })
+          .limit(1);
+
+        if (!error) {
+          const row = data?.[0];
+          if (row?.id && row.id !== lastSeenId) {
+            const title = row?.gifts?.title;
+            return title || 'gift';
+          }
+        }
+
+        await new Promise((r) => setTimeout(r, 900));
+      }
+      throw new Error('timeout');
+    }
+
+    async function waitForRuntimeState(runtime, state, timeoutMs) {
+      const start = performance.now();
+      while (performance.now() - start < timeoutMs) {
+        if (runtime.state === state) return;
+        await new Promise((r) => setTimeout(r, 60));
+      }
+      throw new Error('state_timeout');
     }
 
     window.__uttTeardown = async () => {

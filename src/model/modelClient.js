@@ -14,6 +14,12 @@ export class ModelClient {
   async request(operation, payload, { timeoutMs = DEFAULT_TIMEOUT_MS, stream = false, onProgress, clientOpId } = {}) {
     const start = performance.now();
 
+    const toolhouseConfigured = import.meta.env.PROD
+      ? true
+      : Boolean(import.meta.env.VITE_TOOLHOUSE_URL && import.meta.env.VITE_TOOLHOUSE_API_KEY);
+    const primary = import.meta.env.PROD && toolhouseConfigured ? 'toolhouse' : 'ollama';
+    const secondary = primary === 'ollama' ? 'toolhouse' : 'ollama';
+
     const attempt = async (providerName) => {
       const fn = providerName === 'ollama' ? callOllama : callToolhouse;
       const { provider, text } = await fn({
@@ -29,9 +35,9 @@ export class ModelClient {
       return { provider, validated };
     };
 
-    // Primary: Ollama.
+    // Primary provider.
     try {
-      const { provider, validated } = await attempt('ollama');
+      const { provider, validated } = await attempt(primary);
       const durationMs = Math.round(performance.now() - start);
       this.telemetry?.emit?.('wish_submitted', {
         clientOpId: clientOpId || null,
@@ -48,14 +54,14 @@ export class ModelClient {
       // Fallback exactly once.
       this.telemetry?.emit?.('model_provider_fallback', {
         clientOpId: clientOpId || null,
-        from: 'ollama',
-        to: 'toolhouse',
+        from: primary,
+        to: secondary,
         reason,
         operation
       });
 
       try {
-        const { provider, validated } = await attempt('toolhouse');
+        const { provider, validated } = await attempt(secondary);
         const durationMs = Math.round(performance.now() - start);
         this.telemetry?.emit?.('wish_submitted', {
           clientOpId: clientOpId || null,

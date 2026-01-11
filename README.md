@@ -172,8 +172,15 @@ This repo includes a Supabase-backed “Wish from Santa” flow with an offline 
 
 The model client is deterministic and strict JSON-only:
 
-- Primary: local Ollama (`llama3.2:3b`)
-- Fallback: Toolhouse (OpenAI-compatible endpoint) **once** per action, only on timeout/malformed JSON.
+- Dev default: local Ollama (`llama3.2:3b`)
+- Production (recommended): Toolhouse (OpenAI-compatible endpoint)
+
+Provider selection behavior:
+
+- In dev, Ollama is attempted first (via the Vite proxy `/ollama`).
+- In production, if `VITE_TOOLHOUSE_URL` + `VITE_TOOLHOUSE_API_KEY` are set, Toolhouse is attempted first.
+- In production, Toolhouse is called via a Vercel serverless proxy (`/api/toolhouse-chat`) so API keys are NOT shipped to the browser.
+- There is at most one fallback attempt per request.
 
 #### Local Ollama (runs on your laptop)
 
@@ -191,9 +198,34 @@ Create a `.env.local` with:
 - `VITE_SUPABASE_ANON_KEY`
 - `VITE_OLLAMA_URL` (optional; if unset the app uses the Vite proxy `/ollama` → `http://localhost:11434`)
 - `VITE_OLLAMA_MODEL` (optional, default `llama3.2:3b`)
-- `VITE_TOOLHOUSE_URL` (Toolhouse chat completions endpoint URL)
+- `TOOLHOUSE_URL` (Toolhouse chat completions endpoint URL; OpenAI-compatible `chat.completions`)
+- `TOOLHOUSE_API_KEY`
+- `TOOLHOUSE_MODEL` (optional)
+
+Dev-only (not recommended for production):
+
+- `VITE_TOOLHOUSE_URL`
 - `VITE_TOOLHOUSE_API_KEY`
-- `VITE_TOOLHOUSE_MODEL` (optional)
+- `VITE_TOOLHOUSE_MODEL`
+
+### Toolhouse → Supabase linker (bounty mode)
+
+This project can delegate Supabase CRUD operations to a Toolhouse agent (connected via the Toolhouse↔Supabase linker/MCP server).
+
+How it works:
+
+- The frontend calls `/api/toolhouse-agent` with a structured command string.
+- Toolhouse executes the DB operations against Supabase.
+- The frontend then polls Supabase tables and displays updates.
+
+Required env vars (Vercel / server-side):
+
+- `TOOLHOUSE_AGENT_URL` (example: `https://agents.toolhouse.ai/<AGENT_ID>`)
+- `TOOLHOUSE_AGENT_API_KEY` (if your agent is private)
+
+Gift demo:
+
+- Click **More gifts** → we ask the Toolhouse agent to create a new gift + open record, replay the gift animation, then show a centered overlay: “You got an <item>”.
 - `VITE_TELEMETRY_ENDPOINT` (optional; if unset telemetry is buffered locally only)
 
 ### Supabase schema / server-side requirements
