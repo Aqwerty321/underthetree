@@ -121,7 +121,7 @@ export class SupabaseClientWrapper {
           const res = await raceTimeout(
             this.client
               .from('user_gift_opens')
-              .select('id, opened_at, gift_id, client_op_id, gift:gifts!user_gift_opens_gift_id_fkey(title, description, meta)')
+              .select('id, opened_at, gift_id, client_op_id')
               .eq('client_op_id', cop)
               .order('opened_at', { ascending: false })
               .limit(1),
@@ -129,14 +129,27 @@ export class SupabaseClientWrapper {
             'supabase_select_timeout'
           );
           const row = res?.data?.[0];
-          const gift = Array.isArray(row?.gift) ? row.gift[0] : row?.gift;
           if (row?.id) {
+            let title = null;
+            let description = null;
+            try {
+              const giftRes = await raceTimeout(
+                this.client.from('gifts').select('title, description').eq('id', row.gift_id).limit(1),
+                Math.min(2500, remainingMs()),
+                'supabase_gift_lookup_timeout'
+              );
+              const giftRow = giftRes?.data?.[0];
+              title = giftRow?.title ?? null;
+              description = giftRow?.description ?? null;
+            } catch {
+              // ignore
+            }
             return {
               ok: true,
               open_id: row?.id ?? null,
               gift_id: row?.gift_id ?? null,
-              title: gift?.title ?? null,
-              description: gift?.description ?? null,
+              title,
+              description,
               opened_at: row?.opened_at ?? null,
               reason: null
             };
@@ -205,6 +218,16 @@ export class SupabaseClientWrapper {
         const code = String(error.code || '');
         const notFound = code === '404' || /not found/i.test(msg);
         if (notFound) {
+          return await directOpenFallback();
+        }
+      }
+
+      // If RPC exists but still errors (400/PGRST/permission mismatch), fall back.
+      if (error) {
+        const msg = String(error.message || '');
+        const code = String(error.code || '');
+        const badRequest = code === '400' || code.startsWith('PGRST') || /bad request/i.test(msg);
+        if (badRequest) {
           return await directOpenFallback();
         }
       }
