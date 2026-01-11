@@ -793,6 +793,18 @@ export async function mountLanding() {
         return opened || null;
       })().catch(() => null);
 
+      // Start an enrich poll in parallel so we can show the real gift title immediately at reveal.
+      // (Does not block; we only consume it later.)
+      const enrichGiftPromise =
+        !skipAgentRequest && client_op_id
+          ? waitForNewGiftByClientOpId({ client_op_id, supabaseClient, timeoutMs: 12000 }).catch(() => null)
+          : Promise.resolve(null);
+
+      // Show the reward container early while the gift is opening.
+      if (!skipRewardOverlay) {
+        rewardOverlay?.show?.({ loading: true }).catch(() => {});
+      }
+
       const showRewardFromResult = async ({ opened, assumeVisible = false }) => {
         if (!assumeVisible) {
           // Always show a celebratory container immediately; update when data arrives.
@@ -842,9 +854,13 @@ export async function mountLanding() {
 
         if (!skipRewardOverlay) {
           try {
-            await rewardOverlay?.show?.({ loading: true });
             const opened = await agentGiftPromise;
-            await showRewardFromResult({ opened, assumeVisible: true });
+            // If the open result lacks a title, use the parallel enrich poll if ready.
+            const enrich = await Promise.race([
+              enrichGiftPromise,
+              new Promise((r) => setTimeout(() => r(null), 2500))
+            ]);
+            await showRewardFromResult({ opened: opened?.title || opened?.description ? opened : enrich || opened, assumeVisible: true });
           } catch {
             // Best-effort only.
           }
@@ -883,9 +899,12 @@ export async function mountLanding() {
 
         if (!skipRewardOverlay) {
           try {
-            await rewardOverlay?.show?.({ loading: true });
             const opened = await agentGiftPromise;
-            await showRewardFromResult({ opened, assumeVisible: true });
+            const enrich = await Promise.race([
+              enrichGiftPromise,
+              new Promise((r) => setTimeout(() => r(null), 2500))
+            ]);
+            await showRewardFromResult({ opened: opened?.title || opened?.description ? opened : enrich || opened, assumeVisible: true });
           } catch {
             // Best-effort: no reward.
           }
@@ -900,9 +919,12 @@ export async function mountLanding() {
 
         if (!skipRewardOverlay) {
           try {
-            await rewardOverlay?.show?.({ loading: true });
             const opened = await agentGiftPromise;
-            await showRewardFromResult({ opened, assumeVisible: true });
+            const enrich = await Promise.race([
+              enrichGiftPromise,
+              new Promise((r) => setTimeout(() => r(null), 2500))
+            ]);
+            await showRewardFromResult({ opened: opened?.title || opened?.description ? opened : enrich || opened, assumeVisible: true });
           } catch {
             // Best-effort only.
           }
@@ -1096,7 +1118,7 @@ export async function mountLanding() {
       while (performance.now() - start < timeoutMs) {
         const { data, error } = await supabaseClient.client
           .from('user_gift_opens')
-          .select('id, opened_at, gift_id, client_op_id, gift:gifts(title, description, meta)')
+          .select('id, opened_at, gift_id, client_op_id, gift:public.gifts!user_gift_opens_gift_id_fkey(title, description, meta)')
           .eq('user_id', user_id)
           .order('opened_at', { ascending: false })
           .limit(1);
@@ -1138,7 +1160,7 @@ export async function mountLanding() {
       while (performance.now() - start < timeoutMs) {
         const { data, error } = await supabaseClient.client
           .from('user_gift_opens')
-          .select('id, opened_at, gift_id, client_op_id, gift:gifts(title, description, meta)')
+          .select('id, opened_at, gift_id, client_op_id, gift:public.gifts!user_gift_opens_gift_id_fkey(title, description, meta)')
           .eq('client_op_id', client_op_id)
           .order('opened_at', { ascending: false })
           .limit(1);
