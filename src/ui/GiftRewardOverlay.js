@@ -100,8 +100,11 @@ function buildDetailRows(item) {
   const giftId = item?.gift_id;
   if (giftId) rows.push({ label: 'Gift ID', value: String(giftId) });
 
+  // Client op id is useful for debugging, but not celebratory.
+  // Only show it when explicitly requested.
+  const showDebug = Boolean(item?.show_debug);
   const clientOpId = item?.client_op_id;
-  if (clientOpId) rows.push({ label: 'Client Op', value: String(clientOpId) });
+  if (showDebug && clientOpId) rows.push({ label: 'Client Op', value: String(clientOpId) });
 
   // Meta: include any extra meta keys as readable lines (no JSON output).
   const metaLines = meta ? flattenMetaToLines(meta) : [];
@@ -130,6 +133,10 @@ export class GiftRewardOverlay {
     this.header = document.createElement('div');
     this.header.className = 'utt-reward-header';
 
+    this.kicker = document.createElement('div');
+    this.kicker.className = 'utt-reward-kicker';
+    this.kicker.textContent = 'Congratulations!';
+
     this.text = document.createElement('div');
     this.text.className = 'utt-reward-text';
     this.text.textContent = '';
@@ -147,6 +154,8 @@ export class GiftRewardOverlay {
 
     this.header.appendChild(this.text);
     this.header.appendChild(this.desc);
+
+    this.header.prepend(this.kicker);
 
     this.card.appendChild(this.header);
     this.card.appendChild(this.details);
@@ -171,7 +180,9 @@ export class GiftRewardOverlay {
     const title = typeof item === 'string' ? item : item?.title;
     const description = typeof item === 'string' ? null : item?.description;
 
-    this.text.textContent = `You got an ${String(title || 'item')}!`;
+    const t = String(title || 'gift');
+    const article = /^[aeiou]/i.test(t.trim()) ? 'an' : 'a';
+    this.text.textContent = `You got ${article} ${t}!`;
     this.desc.textContent = description ? String(description) : '';
     this.desc.classList.toggle('utt-hidden', !description);
 

@@ -234,9 +234,10 @@ export async function mountLanding() {
 
   const toast = ensureToast(document.body);
 
-  async function requestGiftOpen({ user_id, client_op_id, timeoutMs = 15000 } = {}) {
+  async function requestGiftOpen({ user_id, client_op_id, timeoutMs = 9000 } = {}) {
     const uid = String(user_id || 'anonymous');
     const cop = client_op_id != null && String(client_op_id).trim() ? String(client_op_id).trim() : null;
+    const startedAt = Date.now();
 
     // 1) Try Toolhouse agent (preferred for the bounty flow).
     try {
@@ -278,7 +279,13 @@ export async function mountLanding() {
 
     // 2) Manual CRUD fallback: call Supabase RPC directly.
     try {
-      const r = await supabaseClient?.openGiftForUser?.({ user_id: uid, client_op_id: cop });
+      const elapsedMs = Date.now() - startedAt;
+      const remainingMs = Math.max(1000, Number(timeoutMs || 0) - elapsedMs);
+      const r = await supabaseClient?.openGiftForUser?.({
+        user_id: uid,
+        client_op_id: cop,
+        timeoutMs: Math.min(8000, remainingMs)
+      });
       return {
         source: 'supabase',
         title: r?.title || null,
@@ -664,9 +671,12 @@ export async function mountLanding() {
             giftOverlay.setDisabled(true);
             toast.show('Looking for more gifts…');
 
-            const opened = await requestGiftOpen({ user_id, client_op_id, timeoutMs: 15000 });
-            const agentGiftTitle = opened?.title || null;
-            const agentGiftDescription = opened?.description || null;
+            // Start the DB write now, but do not allow it to stall the UX for long.
+            const opened = await withTimeout(
+              Promise.resolve(requestGiftOpen({ user_id, client_op_id, timeoutMs: 9000 })),
+              9500,
+              'open_gift_timeout'
+            ).catch(() => null);
 
             // 2) Replay the full gift opening animation.
             runtime.state = 'giftOverlayShown';
@@ -678,28 +688,41 @@ export async function mountLanding() {
             skipNextGiftRewardOverlay = true;
             await giftOverlay.replayGiftOpen();
 
-            // 3) After animation completes (reveal), poll Supabase for the new row and show the reward overlay.
+            // 3) After animation completes (reveal), show the reward immediately.
             try {
               await waitForRuntimeState(runtime, 'reveal', 25000);
-              const gift =
-                (await waitForNewGiftByClientOpId({ client_op_id, supabaseClient, timeoutMs: 20000 }).catch(() => null)) ||
-                (await waitForNewGift({ user_id, supabaseClient, lastSeenId, timeoutMs: 20000 }).catch(() => null));
+              // Preferred: show from RPC/agent return (fast, reliable).
+              if (opened && typeof opened === 'object' && (opened.title || opened.description || opened.open_id || opened.gift_id)) {
+                await rewardOverlay?.show?.({
+                  title: opened.title || 'gift',
+                  description: opened.description || null,
+                  meta: opened.meta || null,
+                  opened_at: opened.opened_at || null,
+                  open_id: opened.open_id || null,
+                  gift_id: opened.gift_id || null,
+                  client_op_id,
+                  reason: opened.reason || null,
+                  show_debug: false
+                });
+                return;
+              }
 
-              const merged = {
-                title: gift?.title || agentGiftTitle || 'gift',
-                description: gift?.description || agentGiftDescription || null,
+              // Fallback: short poll to enrich, but never block the celebration.
+              const gift =
+                (await waitForNewGiftByClientOpId({ client_op_id, supabaseClient, timeoutMs: 4000 }).catch(() => null)) ||
+                (await waitForNewGift({ user_id, supabaseClient, lastSeenId, timeoutMs: 4000 }).catch(() => null));
+
+              await rewardOverlay?.show?.({
+                title: gift?.title || 'gift',
+                description: gift?.description || null,
                 meta: gift?.meta || null,
                 opened_at: gift?.opened_at || null,
                 open_id: gift?.open_id || null,
                 gift_id: gift?.gift_id || null,
                 client_op_id,
-                reason: gift?.reason || null
-              };
-
-              // Prefer agent/Supabase-RPC reason if DB polling doesn't have it.
-              if (!merged.reason && opened && typeof opened === 'object') merged.reason = opened.reason || null;
-
-              await rewardOverlay?.show?.(merged);
+                reason: gift?.reason || null,
+                show_debug: false
+              });
             } catch {
               // Best-effort: no reward.
             } finally {
@@ -752,9 +775,50 @@ export async function mountLanding() {
       const agentGiftPromise = (async () => {
         if (skipAgentRequest) return null;
         toast.show('Opening your gift…');
-        const opened = await requestGiftOpen({ user_id, client_op_id, timeoutMs: 15000 });
+        // Cap total wait so the UI can't stall for minutes.
+        const opened = await withTimeout(
+          Promise.resolve(requestGiftOpen({ user_id, client_op_id, timeoutMs: 9000 })),
+          9500,
+          'open_gift_timeout'
+        ).catch(() => null);
         return opened || null;
       })().catch(() => null);
+
+      const showRewardFromResult = async ({ opened }) => {
+        // Preferred: show from RPC/agent return (fast, reliable).
+        if (opened && typeof opened === 'object' && (opened.title || opened.description || opened.open_id || opened.gift_id)) {
+          await rewardOverlay?.show?.({
+            title: opened.title || 'gift',
+            description: opened.description || null,
+            meta: opened.meta || null,
+            opened_at: opened.opened_at || null,
+            open_id: opened.open_id || null,
+            gift_id: opened.gift_id || null,
+            client_op_id,
+            reason: opened.reason || null,
+            show_debug: false
+          });
+          return;
+        }
+
+        // Fallback: short poll to enrich, but never block the celebration.
+        const gift =
+          (client_op_id
+            ? await waitForNewGiftByClientOpId({ client_op_id, supabaseClient, timeoutMs: 4000 }).catch(() => null)
+            : null) || (await waitForNewGift({ user_id, supabaseClient, lastSeenId, timeoutMs: 4000 }).catch(() => null));
+
+        await rewardOverlay?.show?.({
+          title: gift?.title || 'gift',
+          description: gift?.description || null,
+          meta: gift?.meta || null,
+          opened_at: gift?.opened_at || null,
+          open_id: gift?.open_id || null,
+          gift_id: gift?.gift_id || null,
+          client_op_id,
+          reason: gift?.reason || null,
+          show_debug: false
+        });
+      };
 
       if (runtime.prefersReducedMotion) {
         giftOverlay.setPreviewImage(config.assets.giftOverlay.giftOpenStatic);
@@ -763,23 +827,8 @@ export async function mountLanding() {
 
         if (!skipRewardOverlay) {
           try {
-            const agentGift = await agentGiftPromise;
-            const gift =
-              (client_op_id
-                ? await waitForNewGiftByClientOpId({ client_op_id, supabaseClient, timeoutMs: 20000 }).catch(() => null)
-                : null) ||
-              (await waitForNewGift({ user_id, supabaseClient, lastSeenId, timeoutMs: 20000 }).catch(() => null));
-            const merged = {
-              title: gift?.title || agentGift?.title || 'gift',
-              description: gift?.description || agentGift?.description || null,
-              meta: gift?.meta || null,
-              opened_at: gift?.opened_at || agentGift?.opened_at || null,
-              open_id: gift?.open_id || agentGift?.open_id || null,
-              gift_id: gift?.gift_id || agentGift?.gift_id || null,
-              client_op_id,
-              reason: agentGift?.reason || null
-            };
-            await rewardOverlay?.show?.(merged);
+            const opened = await agentGiftPromise;
+            await showRewardFromResult({ opened });
           } catch {
             // Best-effort only.
           }
@@ -818,23 +867,8 @@ export async function mountLanding() {
 
         if (!skipRewardOverlay) {
           try {
-            const agentGift = await agentGiftPromise;
-            const gift =
-              (client_op_id
-                ? await waitForNewGiftByClientOpId({ client_op_id, supabaseClient, timeoutMs: 20000 }).catch(() => null)
-                : null) ||
-              (await waitForNewGift({ user_id, supabaseClient, lastSeenId, timeoutMs: 20000 }).catch(() => null));
-            const merged = {
-              title: gift?.title || agentGift?.title || 'gift',
-              description: gift?.description || agentGift?.description || null,
-              meta: gift?.meta || null,
-              opened_at: gift?.opened_at || agentGift?.opened_at || null,
-              open_id: gift?.open_id || agentGift?.open_id || null,
-              gift_id: gift?.gift_id || agentGift?.gift_id || null,
-              client_op_id,
-              reason: agentGift?.reason || null
-            };
-            await rewardOverlay?.show?.(merged);
+            const opened = await agentGiftPromise;
+            await showRewardFromResult({ opened });
           } catch {
             // Best-effort: no reward.
           }
@@ -849,23 +883,8 @@ export async function mountLanding() {
 
         if (!skipRewardOverlay) {
           try {
-            const agentGift = await agentGiftPromise;
-            const gift =
-              (client_op_id
-                ? await waitForNewGiftByClientOpId({ client_op_id, supabaseClient, timeoutMs: 20000 }).catch(() => null)
-                : null) ||
-              (await waitForNewGift({ user_id, supabaseClient, lastSeenId, timeoutMs: 20000 }).catch(() => null));
-            const merged = {
-              title: gift?.title || agentGift?.title || 'gift',
-              description: gift?.description || agentGift?.description || null,
-              meta: gift?.meta || null,
-              opened_at: gift?.opened_at || agentGift?.opened_at || null,
-              open_id: gift?.open_id || agentGift?.open_id || null,
-              gift_id: gift?.gift_id || agentGift?.gift_id || null,
-              client_op_id,
-              reason: agentGift?.reason || null
-            };
-            await rewardOverlay?.show?.(merged);
+            const opened = await agentGiftPromise;
+            await showRewardFromResult({ opened });
           } catch {
             // Best-effort only.
           }

@@ -543,6 +543,14 @@
   text-align: center;
 }
 
+.utt-reward-kicker {
+  font-size: 14px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.72);
+  margin-bottom: 10px;
+}
+
 .utt-reward-text {
   font-size: 44px;
   font-weight: 700;
