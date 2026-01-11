@@ -100,14 +100,83 @@ export class SupabaseClientWrapper {
     const cop = client_op_id != null && String(client_op_id).trim() ? String(client_op_id).trim() : null;
 
     const startedAt = Date.now();
+    const remainingMs = () => Math.max(1000, timeoutMs - (Date.now() - startedAt));
+
+    const raceTimeout = (promise, ms, code) =>
+      Promise.race([
+        promise,
+        new Promise((_, reject) => setTimeout(() => reject(new Error(code || 'timeout')), Math.max(1000, ms)))
+      ]);
 
     const callRpc = async (args) => {
       const rpcPromise = this.client.rpc('open_gift_for_user', args);
-      const { data, error } = await Promise.race([
-        rpcPromise,
-        new Promise((_, reject) => setTimeout(() => reject(new Error('supabase_rpc_timeout')), Math.max(1000, timeoutMs)))
-      ]);
-      return { data, error };
+      const res = await raceTimeout(rpcPromise, timeoutMs, 'supabase_rpc_timeout');
+      return { data: res?.data, error: res?.error, status: res?.status, statusText: res?.statusText };
+    };
+
+    const directOpenFallback = async () => {
+      // 1) If this client op id already exists, return it (idempotent behavior).
+      if (cop) {
+        try {
+          const res = await raceTimeout(
+            this.client
+              .from('user_gift_opens')
+              .select('id, opened_at, gift_id, client_op_id, gift:gifts!user_gift_opens_gift_id_fkey(title, description, meta)')
+              .eq('client_op_id', cop)
+              .order('opened_at', { ascending: false })
+              .limit(1),
+            Math.min(2500, remainingMs()),
+            'supabase_select_timeout'
+          );
+          const row = res?.data?.[0];
+          const gift = Array.isArray(row?.gift) ? row.gift[0] : row?.gift;
+          if (row?.id) {
+            return {
+              ok: true,
+              open_id: row?.id ?? null,
+              gift_id: row?.gift_id ?? null,
+              title: gift?.title ?? null,
+              description: gift?.description ?? null,
+              opened_at: row?.opened_at ?? null,
+              reason: null
+            };
+          }
+        } catch {
+          // ignore
+        }
+      }
+
+      // 2) Select a public gift client-side (simple + reliable) and insert an open row.
+      const giftListRes = await raceTimeout(
+        this.client.from('gifts').select('id, title, description').eq('public', true).limit(200),
+        Math.min(3000, remainingMs()),
+        'supabase_gifts_timeout'
+      );
+      const gifts = Array.isArray(giftListRes?.data) ? giftListRes.data : [];
+      if (!gifts.length) throw new Error('no_gifts_available');
+      const chosen = gifts[Math.floor(Math.random() * gifts.length)];
+
+      const insertRes = await raceTimeout(
+        this.client
+          .from('user_gift_opens')
+          .insert({ user_id: uid, gift_id: chosen.id, client_op_id: cop })
+          .select('id, opened_at, gift_id')
+          .limit(1),
+        Math.min(3000, remainingMs()),
+        'supabase_insert_timeout'
+      );
+      if (insertRes?.error) throw insertRes.error;
+      const inserted = Array.isArray(insertRes?.data) ? insertRes.data[0] : insertRes?.data;
+
+      return {
+        ok: true,
+        open_id: inserted?.id ?? null,
+        gift_id: inserted?.gift_id ?? chosen.id ?? null,
+        title: chosen?.title ?? null,
+        description: chosen?.description ?? null,
+        opened_at: inserted?.opened_at ?? null,
+        reason: 'random'
+      };
     };
 
     try {
@@ -127,6 +196,16 @@ export class SupabaseClientWrapper {
 
         if (looksLikeSignatureMismatch) {
           ({ data, error } = await callRpc({ user_id: uid, client_op_id: cop }));
+        }
+      }
+
+      // If the RPC route doesn't exist (function missing in this Supabase project), fall back.
+      if (error) {
+        const msg = String(error.message || '');
+        const code = String(error.code || '');
+        const notFound = code === '404' || /not found/i.test(msg);
+        if (notFound) {
+          return await directOpenFallback();
         }
       }
 
