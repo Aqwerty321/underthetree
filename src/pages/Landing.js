@@ -152,7 +152,7 @@ function ensureToast(parent) {
       setTimeout(() => {
         el.style.opacity = '0';
         setTimeout(() => el.classList.add('utt-hidden'), 300);
-      }, 1600);
+      }, 2600);
     }
   };
 }
@@ -641,7 +641,9 @@ export async function mountLanding() {
             // 3) After animation completes (reveal), poll Supabase for the new row and show the reward overlay.
             try {
               await waitForRuntimeState(runtime, 'reveal', 25000);
-              const giftTitle = await waitForNewGiftTitle({ user_id, supabaseClient, lastSeenId, timeoutMs: 20000 });
+              const giftTitle =
+                (await waitForNewGiftTitleByClientOpId({ client_op_id, supabaseClient, timeoutMs: 20000 }).catch(() => null)) ||
+                (await waitForNewGiftTitle({ user_id, supabaseClient, lastSeenId, timeoutMs: 20000 }).catch(() => null));
               await rewardOverlay?.show?.(giftTitle || 'gift');
             } catch {
               // Best-effort: no reward.
@@ -903,6 +905,32 @@ export async function mountLanding() {
         }
 
         await new Promise((r) => setTimeout(r, 900));
+      }
+      throw new Error('timeout');
+    }
+
+    async function waitForNewGiftTitleByClientOpId({ client_op_id, supabaseClient, timeoutMs = 15000 }) {
+      if (!supabaseClient?.client) throw new Error('supabase_not_configured');
+      if (!client_op_id) throw new Error('missing_client_op_id');
+
+      const start = performance.now();
+      while (performance.now() - start < timeoutMs) {
+        const { data, error } = await supabaseClient.client
+          .from('user_gift_opens')
+          .select('id, opened_at, gift_id, client_op_id, gifts(title)')
+          .eq('client_op_id', client_op_id)
+          .order('opened_at', { ascending: false })
+          .limit(1);
+
+        if (!error) {
+          const row = data?.[0];
+          if (row?.id) {
+            const title = row?.gifts?.title;
+            return title || 'gift';
+          }
+        }
+
+        await new Promise((r) => setTimeout(r, 700));
       }
       throw new Error('timeout');
     }

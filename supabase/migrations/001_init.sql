@@ -113,8 +113,14 @@ create table if not exists public.user_gift_opens (
   id uuid primary key default gen_random_uuid(),
   user_id text not null,
   gift_id uuid not null references public.gifts(id) on delete cascade,
+  client_op_id text null,
   opened_at timestamptz not null default now()
 );
+
+-- Allow correlating an open back to a specific frontend action.
+create unique index if not exists user_gift_opens_client_op_id_uq
+  on public.user_gift_opens(client_op_id)
+  where client_op_id is not null;
 
 -- wishes
 create table if not exists public.wishes (
@@ -213,7 +219,7 @@ execute function public.enforce_wish_rate_limit();
 
 -- Gift selection helper: prefer gifts that match a user's wishes (tags/summary/text),
 -- otherwise fall back to a random public gift. Avoid repeats for the user when possible.
-create or replace function public.open_gift_for_user(p_user_id text)
+create or replace function public.open_gift_for_user(p_user_id text, p_client_op_id text default null)
 returns table (
   open_id uuid,
   gift_id uuid,
@@ -305,8 +311,8 @@ begin
     raise exception 'no_gifts_available' using errcode = 'P0001';
   end if;
 
-  insert into public.user_gift_opens(user_id, gift_id)
-  values (coalesce(uid, 'anonymous'), chosen_gift_id)
+  insert into public.user_gift_opens(user_id, gift_id, client_op_id)
+  values (coalesce(uid, 'anonymous'), chosen_gift_id, nullif(btrim(p_client_op_id), ''))
   returning id, gift_id, opened_at
   into open_id, gift_id, opened_at;
 
