@@ -101,16 +101,35 @@ export class SupabaseClientWrapper {
 
     const startedAt = Date.now();
 
-    try {
-      const rpcPromise = this.client.rpc('open_gift_for_user', {
-        p_user_id: uid,
-        p_client_op_id: cop
-      });
-
+    const callRpc = async (args) => {
+      const rpcPromise = this.client.rpc('open_gift_for_user', args);
       const { data, error } = await Promise.race([
         rpcPromise,
         new Promise((_, reject) => setTimeout(() => reject(new Error('supabase_rpc_timeout')), Math.max(1000, timeoutMs)))
       ]);
+      return { data, error };
+    };
+
+    try {
+      // Primary (newer) param names.
+      let { data, error } = await callRpc({ p_user_id: uid, p_client_op_id: cop });
+
+      // If the project DB has an older function signature, PostgREST often returns a 400/PGRST error.
+      // Retry with alternate param keys.
+      if (error) {
+        const msg = String(error.message || '');
+        const code = String(error.code || '');
+        const looksLikeSignatureMismatch =
+          code.startsWith('PGRST') ||
+          /function.*open_gift_for_user/i.test(msg) ||
+          /parameters/i.test(msg) ||
+          /does not exist/i.test(msg);
+
+        if (looksLikeSignatureMismatch) {
+          ({ data, error } = await callRpc({ user_id: uid, client_op_id: cop }));
+        }
+      }
+
       if (error) {
         const code = String(error.code || 'SUPABASE_RPC_ERROR');
         throw new SupabaseWriteError(error.message || 'Supabase RPC failed', { code, cause: error });

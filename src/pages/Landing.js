@@ -1149,12 +1149,15 @@ export async function mountLanding() {
 
       const start = performance.now();
       while (performance.now() - start < timeoutMs) {
-        const { data, error } = await supabaseClient.client
+        const { data, error, status } = await supabaseClient.client
           .from('user_gift_opens')
-          .select('id, opened_at, gift_id, client_op_id, gift:public.gifts!user_gift_opens_gift_id_fkey(title, description, meta)')
+          .select('id, opened_at, gift_id, client_op_id, gift:gifts!user_gift_opens_gift_id_fkey(title, description, meta)')
           .eq('user_id', user_id)
           .order('opened_at', { ascending: false })
           .limit(1);
+
+        // Non-retryable bad request (usually malformed select string).
+        if (error && status === 400) throw new Error('bad_request');
 
         if (!error) {
           const row = data?.[0];
@@ -1191,12 +1194,15 @@ export async function mountLanding() {
 
       const start = performance.now();
       while (performance.now() - start < timeoutMs) {
-        const { data, error } = await supabaseClient.client
+        const { data, error, status } = await supabaseClient.client
           .from('user_gift_opens')
-          .select('id, opened_at, gift_id, client_op_id, gift:public.gifts!user_gift_opens_gift_id_fkey(title, description, meta)')
+          .select('id, opened_at, gift_id, client_op_id, gift:gifts!user_gift_opens_gift_id_fkey(title, description, meta)')
           .eq('client_op_id', client_op_id)
           .order('opened_at', { ascending: false })
           .limit(1);
+
+        // Non-retryable bad request (usually malformed select string).
+        if (error && status === 400) throw new Error('bad_request');
 
         if (!error) {
           const row = data?.[0];
