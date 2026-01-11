@@ -62,6 +62,26 @@ export class CinematicPlayer {
     this.loading.wrap.remove();
     this.loading = null;
 
+    // Start playback only after the loading UI is gone.
+    // (Fixes cases where the video finishes behind the loading overlay.)
+    try {
+      this.video.currentTime = 0;
+    } catch {
+      // ignore
+    }
+
+    // Attach ended listener before play() so we don't miss short videos.
+    const ended = new Promise((resolve) => {
+      this.video.addEventListener('ended', resolve, { once: true });
+    });
+
+    try {
+      const playPromise = this.video.play();
+      if (playPromise && typeof playPromise.then === 'function') await playPromise;
+    } catch {
+      // If play() fails (rare since video is muted), just proceed; the fade will show first frame if available.
+    }
+
     // Fade in video from black.
     const fadeInMs = (this.config.flow?.CINEMATIC_FADE_IN ?? 0.6) * 1000;
     const easeOutQuad = cubicBezierString('easeOutQuad', this.config);
@@ -75,9 +95,7 @@ export class CinematicPlayer {
 
     await Promise.all([videoFade, blackFade]);
 
-    await new Promise((resolve) => {
-      this.video.addEventListener('ended', resolve, { once: true });
-    });
+    await ended;
 
     // Fade to black on end.
     await this.fadeToBlack();
@@ -189,6 +207,18 @@ export class CinematicPlayer {
 
     const video = this.video;
 
+    // Ensure we are NOT playing while the loading UI is visible.
+    try {
+      video.pause();
+    } catch {
+      // ignore
+    }
+    try {
+      if (!Number.isFinite(video.currentTime) || video.currentTime !== 0) video.currentTime = 0;
+    } catch {
+      // ignore
+    }
+
     // Attach readiness listeners before play() to avoid missing early events.
     let canPlay = video.readyState >= 3;
     const markReady = () => {
@@ -198,9 +228,11 @@ export class CinematicPlayer {
     video.addEventListener('canplay', markReady);
     video.addEventListener('loadeddata', markReady);
 
-    const playPromise = video.play();
-    if (playPromise && typeof playPromise.then === 'function') {
-      await playPromise;
+    // Kick off buffering without starting playback.
+    try {
+      video.load();
+    } catch {
+      // ignore
     }
 
     const start = performance.now();
