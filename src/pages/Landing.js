@@ -234,6 +234,39 @@ export async function mountLanding() {
 
   const toast = ensureToast(document.body);
 
+  // Debug-only: quickly verify Supabase env/config + basic read access.
+  // Use: add `?debug=true` to the URL.
+  if (debugEnabled) {
+    try {
+      const isConfigured = supabaseClient?.isConfigured?.() ?? false;
+      // eslint-disable-next-line no-console
+      console.log('[UTT] Supabase configured:', isConfigured);
+
+      if (!isConfigured) {
+        toast.show('DEBUG: Supabase not configured (missing VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY)');
+      } else {
+        const probe = async () => {
+          const { data, error } = await supabaseClient.client.from('gifts').select('id, title').limit(1);
+          if (error) throw error;
+          return data?.[0]?.title || null;
+        };
+
+        withTimeout(probe(), 3500, 'supabase_probe_timeout')
+          .then((title) => {
+            // eslint-disable-next-line no-console
+            console.log('[UTT] Supabase probe OK. Sample gift:', title);
+          })
+          .catch((e) => {
+            // eslint-disable-next-line no-console
+            console.warn('[UTT] Supabase probe FAILED:', e?.message || e);
+            toast.show('DEBUG: Supabase probe failed (check env vars, RLS, network)');
+          });
+      }
+    } catch {
+      // ignore
+    }
+  }
+
   async function requestGiftOpen({ user_id, client_op_id, timeoutMs = 9000 } = {}) {
     const uid = String(user_id || 'anonymous');
     const cop = client_op_id != null && String(client_op_id).trim() ? String(client_op_id).trim() : null;
