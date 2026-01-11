@@ -281,6 +281,12 @@ export async function mountLanding() {
 
     rewardOverlay = new GiftRewardOverlay({ parent: document.body, config });
 
+    // The gift open animation is replayed by the "More gifts" flow.
+    // During that replay, the DB write + reward overlay is handled by onMoreGifts,
+    // so we suppress the next startGiftOpenFlow from doing duplicate work.
+    let skipNextGiftAgentRequest = false;
+    let skipNextGiftRewardOverlay = false;
+
     const processPendingQueue = async ({ force = false } = {}) => {
       const before = pendingQueue?.getCounts?.()?.total ?? 0;
       await pendingQueue?.process?.({
@@ -597,6 +603,8 @@ export async function mountLanding() {
             giftOverlay.setDisabled(true);
             toast.show('Looking for more gifts…');
 
+            let agentGiftTitle = null;
+
             try {
               const raw = await callToolhouseAgentPayload({
                 command: 'OPEN_GIFT',
@@ -613,6 +621,14 @@ export async function mountLanding() {
                   const msg = parsed?.error?.message || 'Agent returned ok=false';
                   throw new Error(`agent:${code}:${msg}`);
                 }
+
+                // Best-effort: extract the gift title from agent output.
+                agentGiftTitle =
+                  parsed?.result?.open?.title ||
+                  parsed?.result?.open?.gift_title ||
+                  parsed?.open?.gift_title ||
+                  parsed?.open?.gift_title ||
+                  null;
               } catch {
                 // Not JSON or not parseable; ignore.
               }
@@ -636,6 +652,12 @@ export async function mountLanding() {
 
             // 2) Replay the full gift opening animation.
             runtime.state = 'giftOverlayShown';
+
+            // startGiftOpenFlow is triggered by GiftOverlay's onOpenGift callback during replay.
+            // We already created the gift open record above, and we want to keep the UI disabled
+            // until we show the reward, so suppress duplicate work.
+            skipNextGiftAgentRequest = true;
+            skipNextGiftRewardOverlay = true;
             await giftOverlay.replayGiftOpen();
 
             // 3) After animation completes (reveal), poll Supabase for the new row and show the reward overlay.
@@ -644,7 +666,7 @@ export async function mountLanding() {
               const giftTitle =
                 (await waitForNewGiftTitleByClientOpId({ client_op_id, supabaseClient, timeoutMs: 20000 }).catch(() => null)) ||
                 (await waitForNewGiftTitle({ user_id, supabaseClient, lastSeenId, timeoutMs: 20000 }).catch(() => null));
-              await rewardOverlay?.show?.(giftTitle || 'gift');
+              await rewardOverlay?.show?.(giftTitle || agentGiftTitle || 'gift');
             } catch {
               // Best-effort: no reward.
             } finally {
@@ -670,11 +692,99 @@ export async function mountLanding() {
       if (runtime.state !== 'giftOverlayShown') return;
       runtime.state = 'openingGift';
 
+      const skipAgentRequest = skipNextGiftAgentRequest;
+      const skipRewardOverlay = skipNextGiftRewardOverlay;
+      skipNextGiftAgentRequest = false;
+      skipNextGiftRewardOverlay = false;
+
+      const user_id = getOrCreateAnonUserId();
+      let client_op_id = null;
+      let lastSeenId = null;
+
+      if (!skipAgentRequest) {
+        try {
+          client_op_id = crypto.randomUUID();
+        } catch {
+          client_op_id = `op_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+        }
+
+        try {
+          lastSeenId = await fetchLatestGiftOpenId({ user_id, supabaseClient });
+        } catch {
+          // ignore
+        }
+      }
+
+      // Kick off the agent request in parallel with the animation (best-effort).
+      const agentGiftTitlePromise = (async () => {
+        if (skipAgentRequest) return null;
+
+        toast.show('Opening your gift…');
+        const raw = await callToolhouseAgentPayload({
+          command: 'OPEN_GIFT',
+          user_id,
+          client_op_id
+        });
+
+        try {
+          const parsed = JSON.parse(String(raw || ''));
+          if (parsed && parsed.ok === false) {
+            const code = parsed?.error?.code || 'AGENT_ERROR';
+            const msg = parsed?.error?.message || 'Agent returned ok=false';
+            throw new Error(`agent:${code}:${msg}`);
+          }
+          return (
+            parsed?.result?.open?.title ||
+            parsed?.result?.open?.gift_title ||
+            parsed?.open?.gift_title ||
+            null
+          );
+        } catch {
+          // Not JSON or no title; treat as unknown.
+          return null;
+        }
+      })().catch((e) => {
+        if (skipAgentRequest) return null;
+
+        // Keep the animation/reveal working even if the agent fails.
+        if (e instanceof ToolhouseAgentError) {
+          if (e.code === 'NOT_CONFIGURED') toast.show('Toolhouse agent not configured (set TOOLHOUSE_AGENT_URL)');
+          else if (e.code === 'TIMEOUT') toast.show('Toolhouse agent timed out');
+          else if (e.code === 'NETWORK') toast.show('Network error contacting Toolhouse agent');
+          else toast.show('Toolhouse agent error');
+        } else if (typeof e?.message === 'string' && e.message.startsWith('agent:')) {
+          const parts = e.message.split(':');
+          const code = parts[1] || 'AGENT_ERROR';
+          const msg = parts.slice(2).join(':') || '';
+          toast.show(msg ? `Agent error (${code}): ${msg}` : `Agent error (${code})`);
+        } else {
+          toast.show('Could not get a gift right now');
+        }
+
+        return null;
+      });
+
       if (runtime.prefersReducedMotion) {
         giftOverlay.setPreviewImage(config.assets.giftOverlay.giftOpenStatic);
-        giftOverlay.setDisabled(false);
         giftOverlay.showReveal();
         runtime.state = 'reveal';
+
+        if (!skipRewardOverlay) {
+          try {
+            const agentGiftTitle = await agentGiftTitlePromise;
+            const giftTitle =
+              (client_op_id
+                ? await waitForNewGiftTitleByClientOpId({ client_op_id, supabaseClient, timeoutMs: 20000 }).catch(() => null)
+                : null) ||
+              (await waitForNewGiftTitle({ user_id, supabaseClient, lastSeenId, timeoutMs: 20000 }).catch(() => null)) ||
+              agentGiftTitle;
+            await rewardOverlay?.show?.(giftTitle || 'gift');
+          } catch {
+            // Best-effort only.
+          }
+        }
+
+        if (!skipRewardOverlay) giftOverlay.setDisabled(false);
         return;
       }
 
@@ -703,14 +813,46 @@ export async function mountLanding() {
         await videoLayers.fadeOutConfetti();
 
         runtime.state = 'reveal';
-        giftOverlay.setDisabled(false);
         giftOverlay.showReveal();
+
+        if (!skipRewardOverlay) {
+          try {
+            const agentGiftTitle = await agentGiftTitlePromise;
+            const giftTitle =
+              (client_op_id
+                ? await waitForNewGiftTitleByClientOpId({ client_op_id, supabaseClient, timeoutMs: 20000 }).catch(() => null)
+                : null) ||
+              (await waitForNewGiftTitle({ user_id, supabaseClient, lastSeenId, timeoutMs: 20000 }).catch(() => null)) ||
+              agentGiftTitle;
+            await rewardOverlay?.show?.(giftTitle || 'gift');
+          } catch {
+            // Best-effort: no reward.
+          }
+        }
+
+        if (!skipRewardOverlay) giftOverlay.setDisabled(false);
       } catch {
         // Fallback: show static open frame.
         giftOverlay.setPreviewImage(config.assets.giftOverlay.giftOpenStatic);
-        giftOverlay.setDisabled(false);
         giftOverlay.showReveal();
         runtime.state = 'reveal';
+
+        if (!skipRewardOverlay) {
+          try {
+            const agentGiftTitle = await agentGiftTitlePromise;
+            const giftTitle =
+              (client_op_id
+                ? await waitForNewGiftTitleByClientOpId({ client_op_id, supabaseClient, timeoutMs: 20000 }).catch(() => null)
+                : null) ||
+              (await waitForNewGiftTitle({ user_id, supabaseClient, lastSeenId, timeoutMs: 20000 }).catch(() => null)) ||
+              agentGiftTitle;
+            await rewardOverlay?.show?.(giftTitle || 'gift');
+          } catch {
+            // Best-effort only.
+          }
+        }
+
+        if (!skipRewardOverlay) giftOverlay.setDisabled(false);
       }
     }
 
