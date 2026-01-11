@@ -1080,11 +1080,18 @@ export async function mountLanding() {
       if (!supabaseClient?.client) throw new Error('supabase_not_configured');
       if (!user_id) throw new Error('missing_user_id');
 
+      const getEmbeddedGift = (row) => {
+        const g = row?.gift ?? row?.gifts;
+        if (!g) return null;
+        if (Array.isArray(g)) return g[0] || null;
+        return g;
+      };
+
       const start = performance.now();
       while (performance.now() - start < timeoutMs) {
         const { data, error } = await supabaseClient.client
           .from('user_gift_opens')
-          .select('id, opened_at, gift_id, client_op_id, gifts(title, description, meta)')
+          .select('id, opened_at, gift_id, client_op_id, gift:gifts(title, description, meta)')
           .eq('user_id', user_id)
           .order('opened_at', { ascending: false })
           .limit(1);
@@ -1092,10 +1099,11 @@ export async function mountLanding() {
         if (!error) {
           const row = data?.[0];
           if (row?.id && row.id !== lastSeenId) {
+            const gift = getEmbeddedGift(row);
             return {
-              title: row?.gifts?.title || 'gift',
-              description: row?.gifts?.description || null,
-              meta: row?.gifts?.meta || null,
+              title: gift?.title || 'gift',
+              description: gift?.description || null,
+              meta: gift?.meta || null,
               opened_at: row?.opened_at || null,
               open_id: row?.id || null,
               gift_id: row?.gift_id || null,
@@ -1114,11 +1122,18 @@ export async function mountLanding() {
       if (!supabaseClient?.client) throw new Error('supabase_not_configured');
       if (!client_op_id) throw new Error('missing_client_op_id');
 
+      const getEmbeddedGift = (row) => {
+        const g = row?.gift ?? row?.gifts;
+        if (!g) return null;
+        if (Array.isArray(g)) return g[0] || null;
+        return g;
+      };
+
       const start = performance.now();
       while (performance.now() - start < timeoutMs) {
         const { data, error } = await supabaseClient.client
           .from('user_gift_opens')
-          .select('id, opened_at, gift_id, client_op_id, gifts(title, description, meta)')
+          .select('id, opened_at, gift_id, client_op_id, gift:gifts(title, description, meta)')
           .eq('client_op_id', client_op_id)
           .order('opened_at', { ascending: false })
           .limit(1);
@@ -1126,10 +1141,11 @@ export async function mountLanding() {
         if (!error) {
           const row = data?.[0];
           if (row?.id) {
+            const gift = getEmbeddedGift(row);
             return {
-              title: row?.gifts?.title || 'gift',
-              description: row?.gifts?.description || null,
-              meta: row?.gifts?.meta || null,
+              title: gift?.title || 'gift',
+              description: gift?.description || null,
+              meta: gift?.meta || null,
               opened_at: row?.opened_at || null,
               open_id: row?.id || null,
               gift_id: row?.gift_id || null,
