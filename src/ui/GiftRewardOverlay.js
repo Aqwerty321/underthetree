@@ -51,7 +51,7 @@ export class GiftRewardOverlay {
   }
 
   async show(itemLabel) {
-    this.text.textContent = `You got an ${String(itemLabel || 'item')}`;
+    this.text.textContent = `You got an ${String(itemLabel || 'item')}!`;
     this._open = true;
     this.backdrop.classList.add('utt-visible');
     await transitionOpacity(this.backdrop, 1, 220, this.config.easing.easeOutCubic);
