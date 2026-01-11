@@ -234,6 +234,67 @@ export async function mountLanding() {
 
   const toast = ensureToast(document.body);
 
+  async function requestGiftOpen({ user_id, client_op_id, timeoutMs = 15000 } = {}) {
+    const uid = String(user_id || 'anonymous');
+    const cop = client_op_id != null && String(client_op_id).trim() ? String(client_op_id).trim() : null;
+
+    // 1) Try Toolhouse agent (preferred for the bounty flow).
+    try {
+      const raw = await callToolhouseAgentPayload(
+        {
+          command: 'OPEN_GIFT',
+          user_id: uid,
+          client_op_id: cop
+        },
+        { timeoutMs }
+      );
+
+      // Best-effort parse for title + structured errors.
+      try {
+        const parsed = JSON.parse(String(raw || ''));
+        if (parsed && parsed.ok === false) {
+          const code = parsed?.error?.code || 'AGENT_ERROR';
+          const msg = parsed?.error?.message || 'Agent returned ok=false';
+          throw new Error(`agent:${code}:${msg}`);
+        }
+
+        const open = parsed?.result?.open || parsed?.open || null;
+        const title = open?.title || open?.gift_title || null;
+        const description = open?.description || open?.gift_description || null;
+        const opened_at = open?.opened_at || null;
+        const reason = open?.reason || null;
+        const open_id = open?.open_id || open?.id || null;
+        const gift_id = open?.gift_id || null;
+        const meta = open?.meta || null;
+
+        return { source: 'toolhouse', title, description, opened_at, reason, open_id, gift_id, client_op_id: cop, meta };
+      } catch {
+        // If it's not JSON, still treat the request as successful (agent may have written to DB).
+        return { source: 'toolhouse', title: null, description: null };
+      }
+    } catch {
+      // Intentionally silent: do not toast specific Toolhouse timeout messages.
+    }
+
+    // 2) Manual CRUD fallback: call Supabase RPC directly.
+    try {
+      const r = await supabaseClient?.openGiftForUser?.({ user_id: uid, client_op_id: cop });
+      return {
+        source: 'supabase',
+        title: r?.title || null,
+        description: r?.description || null,
+        opened_at: r?.opened_at || null,
+        reason: r?.reason || null,
+        open_id: r?.open_id || null,
+        gift_id: r?.gift_id || null,
+        client_op_id: cop,
+        meta: null
+      };
+    } catch {
+      return { source: 'none', title: null, description: null };
+    }
+  }
+
   const overlay = new StartOverlay({
     parent: uiEl,
     runtime,
@@ -603,52 +664,9 @@ export async function mountLanding() {
             giftOverlay.setDisabled(true);
             toast.show('Looking for more gifts…');
 
-            let agentGiftTitle = null;
-
-            try {
-              const raw = await callToolhouseAgentPayload({
-                command: 'OPEN_GIFT',
-                user_id,
-                client_op_id
-              });
-
-              // If the agent is configured to return JSON, surface structured errors.
-              // (We keep this tolerant because Toolhouse may stream text.)
-              try {
-                const parsed = JSON.parse(String(raw || ''));
-                if (parsed && parsed.ok === false) {
-                  const code = parsed?.error?.code || 'AGENT_ERROR';
-                  const msg = parsed?.error?.message || 'Agent returned ok=false';
-                  throw new Error(`agent:${code}:${msg}`);
-                }
-
-                // Best-effort: extract the gift title from agent output.
-                agentGiftTitle =
-                  parsed?.result?.open?.title ||
-                  parsed?.result?.open?.gift_title ||
-                  parsed?.open?.gift_title ||
-                  parsed?.open?.gift_title ||
-                  null;
-              } catch {
-                // Not JSON or not parseable; ignore.
-              }
-            } catch (e) {
-              giftOverlay.setDisabled(false);
-              if (e instanceof ToolhouseAgentError) {
-                if (e.code === 'NOT_CONFIGURED') toast.show('Toolhouse agent not configured (set TOOLHOUSE_AGENT_URL)');
-                else if (e.code === 'TIMEOUT') toast.show('Toolhouse agent timed out');
-                else if (e.code === 'NETWORK') toast.show('Network error contacting Toolhouse agent');
-                else toast.show('Toolhouse agent error');
-              } else if (typeof e?.message === 'string' && e.message.startsWith('agent:')) {
-                const parts = e.message.split(':');
-                const code = parts[1] || 'AGENT_ERROR';
-                const msg = parts.slice(2).join(':') || '';
-                toast.show(msg ? `Agent error (${code}): ${msg}` : `Agent error (${code})`);
-              } else {
-                toast.show('Could not get a gift right now');
-              }
-              return;
-            }
+            const opened = await requestGiftOpen({ user_id, client_op_id, timeoutMs: 15000 });
+            const agentGiftTitle = opened?.title || null;
+            const agentGiftDescription = opened?.description || null;
 
             // 2) Replay the full gift opening animation.
             runtime.state = 'giftOverlayShown';
@@ -663,10 +681,25 @@ export async function mountLanding() {
             // 3) After animation completes (reveal), poll Supabase for the new row and show the reward overlay.
             try {
               await waitForRuntimeState(runtime, 'reveal', 25000);
-              const giftTitle =
-                (await waitForNewGiftTitleByClientOpId({ client_op_id, supabaseClient, timeoutMs: 20000 }).catch(() => null)) ||
-                (await waitForNewGiftTitle({ user_id, supabaseClient, lastSeenId, timeoutMs: 20000 }).catch(() => null));
-              await rewardOverlay?.show?.(giftTitle || agentGiftTitle || 'gift');
+              const gift =
+                (await waitForNewGiftByClientOpId({ client_op_id, supabaseClient, timeoutMs: 20000 }).catch(() => null)) ||
+                (await waitForNewGift({ user_id, supabaseClient, lastSeenId, timeoutMs: 20000 }).catch(() => null));
+
+              const merged = {
+                title: gift?.title || agentGiftTitle || 'gift',
+                description: gift?.description || agentGiftDescription || null,
+                meta: gift?.meta || null,
+                opened_at: gift?.opened_at || null,
+                open_id: gift?.open_id || null,
+                gift_id: gift?.gift_id || null,
+                client_op_id,
+                reason: gift?.reason || null
+              };
+
+              // Prefer agent/Supabase-RPC reason if DB polling doesn't have it.
+              if (!merged.reason && opened && typeof opened === 'object') merged.reason = opened.reason || null;
+
+              await rewardOverlay?.show?.(merged);
             } catch {
               // Best-effort: no reward.
             } finally {
@@ -716,53 +749,12 @@ export async function mountLanding() {
       }
 
       // Kick off the agent request in parallel with the animation (best-effort).
-      const agentGiftTitlePromise = (async () => {
+      const agentGiftPromise = (async () => {
         if (skipAgentRequest) return null;
-
         toast.show('Opening your gift…');
-        const raw = await callToolhouseAgentPayload({
-          command: 'OPEN_GIFT',
-          user_id,
-          client_op_id
-        });
-
-        try {
-          const parsed = JSON.parse(String(raw || ''));
-          if (parsed && parsed.ok === false) {
-            const code = parsed?.error?.code || 'AGENT_ERROR';
-            const msg = parsed?.error?.message || 'Agent returned ok=false';
-            throw new Error(`agent:${code}:${msg}`);
-          }
-          return (
-            parsed?.result?.open?.title ||
-            parsed?.result?.open?.gift_title ||
-            parsed?.open?.gift_title ||
-            null
-          );
-        } catch {
-          // Not JSON or no title; treat as unknown.
-          return null;
-        }
-      })().catch((e) => {
-        if (skipAgentRequest) return null;
-
-        // Keep the animation/reveal working even if the agent fails.
-        if (e instanceof ToolhouseAgentError) {
-          if (e.code === 'NOT_CONFIGURED') toast.show('Toolhouse agent not configured (set TOOLHOUSE_AGENT_URL)');
-          else if (e.code === 'TIMEOUT') toast.show('Toolhouse agent timed out');
-          else if (e.code === 'NETWORK') toast.show('Network error contacting Toolhouse agent');
-          else toast.show('Toolhouse agent error');
-        } else if (typeof e?.message === 'string' && e.message.startsWith('agent:')) {
-          const parts = e.message.split(':');
-          const code = parts[1] || 'AGENT_ERROR';
-          const msg = parts.slice(2).join(':') || '';
-          toast.show(msg ? `Agent error (${code}): ${msg}` : `Agent error (${code})`);
-        } else {
-          toast.show('Could not get a gift right now');
-        }
-
-        return null;
-      });
+        const opened = await requestGiftOpen({ user_id, client_op_id, timeoutMs: 15000 });
+        return opened || null;
+      })().catch(() => null);
 
       if (runtime.prefersReducedMotion) {
         giftOverlay.setPreviewImage(config.assets.giftOverlay.giftOpenStatic);
@@ -771,14 +763,23 @@ export async function mountLanding() {
 
         if (!skipRewardOverlay) {
           try {
-            const agentGiftTitle = await agentGiftTitlePromise;
-            const giftTitle =
+            const agentGift = await agentGiftPromise;
+            const gift =
               (client_op_id
-                ? await waitForNewGiftTitleByClientOpId({ client_op_id, supabaseClient, timeoutMs: 20000 }).catch(() => null)
+                ? await waitForNewGiftByClientOpId({ client_op_id, supabaseClient, timeoutMs: 20000 }).catch(() => null)
                 : null) ||
-              (await waitForNewGiftTitle({ user_id, supabaseClient, lastSeenId, timeoutMs: 20000 }).catch(() => null)) ||
-              agentGiftTitle;
-            await rewardOverlay?.show?.(giftTitle || 'gift');
+              (await waitForNewGift({ user_id, supabaseClient, lastSeenId, timeoutMs: 20000 }).catch(() => null));
+            const merged = {
+              title: gift?.title || agentGift?.title || 'gift',
+              description: gift?.description || agentGift?.description || null,
+              meta: gift?.meta || null,
+              opened_at: gift?.opened_at || agentGift?.opened_at || null,
+              open_id: gift?.open_id || agentGift?.open_id || null,
+              gift_id: gift?.gift_id || agentGift?.gift_id || null,
+              client_op_id,
+              reason: agentGift?.reason || null
+            };
+            await rewardOverlay?.show?.(merged);
           } catch {
             // Best-effort only.
           }
@@ -817,14 +818,23 @@ export async function mountLanding() {
 
         if (!skipRewardOverlay) {
           try {
-            const agentGiftTitle = await agentGiftTitlePromise;
-            const giftTitle =
+            const agentGift = await agentGiftPromise;
+            const gift =
               (client_op_id
-                ? await waitForNewGiftTitleByClientOpId({ client_op_id, supabaseClient, timeoutMs: 20000 }).catch(() => null)
+                ? await waitForNewGiftByClientOpId({ client_op_id, supabaseClient, timeoutMs: 20000 }).catch(() => null)
                 : null) ||
-              (await waitForNewGiftTitle({ user_id, supabaseClient, lastSeenId, timeoutMs: 20000 }).catch(() => null)) ||
-              agentGiftTitle;
-            await rewardOverlay?.show?.(giftTitle || 'gift');
+              (await waitForNewGift({ user_id, supabaseClient, lastSeenId, timeoutMs: 20000 }).catch(() => null));
+            const merged = {
+              title: gift?.title || agentGift?.title || 'gift',
+              description: gift?.description || agentGift?.description || null,
+              meta: gift?.meta || null,
+              opened_at: gift?.opened_at || agentGift?.opened_at || null,
+              open_id: gift?.open_id || agentGift?.open_id || null,
+              gift_id: gift?.gift_id || agentGift?.gift_id || null,
+              client_op_id,
+              reason: agentGift?.reason || null
+            };
+            await rewardOverlay?.show?.(merged);
           } catch {
             // Best-effort: no reward.
           }
@@ -839,14 +849,23 @@ export async function mountLanding() {
 
         if (!skipRewardOverlay) {
           try {
-            const agentGiftTitle = await agentGiftTitlePromise;
-            const giftTitle =
+            const agentGift = await agentGiftPromise;
+            const gift =
               (client_op_id
-                ? await waitForNewGiftTitleByClientOpId({ client_op_id, supabaseClient, timeoutMs: 20000 }).catch(() => null)
+                ? await waitForNewGiftByClientOpId({ client_op_id, supabaseClient, timeoutMs: 20000 }).catch(() => null)
                 : null) ||
-              (await waitForNewGiftTitle({ user_id, supabaseClient, lastSeenId, timeoutMs: 20000 }).catch(() => null)) ||
-              agentGiftTitle;
-            await rewardOverlay?.show?.(giftTitle || 'gift');
+              (await waitForNewGift({ user_id, supabaseClient, lastSeenId, timeoutMs: 20000 }).catch(() => null));
+            const merged = {
+              title: gift?.title || agentGift?.title || 'gift',
+              description: gift?.description || agentGift?.description || null,
+              meta: gift?.meta || null,
+              opened_at: gift?.opened_at || agentGift?.opened_at || null,
+              open_id: gift?.open_id || agentGift?.open_id || null,
+              gift_id: gift?.gift_id || agentGift?.gift_id || null,
+              client_op_id,
+              reason: agentGift?.reason || null
+            };
+            await rewardOverlay?.show?.(merged);
           } catch {
             // Best-effort only.
           }
@@ -1025,7 +1044,7 @@ export async function mountLanding() {
       return data?.[0]?.id ?? null;
     }
 
-    async function waitForNewGiftTitle({ user_id, supabaseClient, lastSeenId, timeoutMs = 15000 }) {
+    async function waitForNewGift({ user_id, supabaseClient, lastSeenId, timeoutMs = 15000 }) {
       if (!supabaseClient?.client) throw new Error('supabase_not_configured');
       if (!user_id) throw new Error('missing_user_id');
 
@@ -1033,7 +1052,7 @@ export async function mountLanding() {
       while (performance.now() - start < timeoutMs) {
         const { data, error } = await supabaseClient.client
           .from('user_gift_opens')
-          .select('id, opened_at, gift_id, gifts(title)')
+          .select('id, opened_at, gift_id, client_op_id, gifts(title, description, meta)')
           .eq('user_id', user_id)
           .order('opened_at', { ascending: false })
           .limit(1);
@@ -1041,8 +1060,16 @@ export async function mountLanding() {
         if (!error) {
           const row = data?.[0];
           if (row?.id && row.id !== lastSeenId) {
-            const title = row?.gifts?.title;
-            return title || 'gift';
+            return {
+              title: row?.gifts?.title || 'gift',
+              description: row?.gifts?.description || null,
+              meta: row?.gifts?.meta || null,
+              opened_at: row?.opened_at || null,
+              open_id: row?.id || null,
+              gift_id: row?.gift_id || null,
+              client_op_id: row?.client_op_id || null,
+              reason: null
+            };
           }
         }
 
@@ -1051,7 +1078,7 @@ export async function mountLanding() {
       throw new Error('timeout');
     }
 
-    async function waitForNewGiftTitleByClientOpId({ client_op_id, supabaseClient, timeoutMs = 15000 }) {
+    async function waitForNewGiftByClientOpId({ client_op_id, supabaseClient, timeoutMs = 15000 }) {
       if (!supabaseClient?.client) throw new Error('supabase_not_configured');
       if (!client_op_id) throw new Error('missing_client_op_id');
 
@@ -1059,7 +1086,7 @@ export async function mountLanding() {
       while (performance.now() - start < timeoutMs) {
         const { data, error } = await supabaseClient.client
           .from('user_gift_opens')
-          .select('id, opened_at, gift_id, client_op_id, gifts(title)')
+          .select('id, opened_at, gift_id, client_op_id, gifts(title, description, meta)')
           .eq('client_op_id', client_op_id)
           .order('opened_at', { ascending: false })
           .limit(1);
@@ -1067,8 +1094,16 @@ export async function mountLanding() {
         if (!error) {
           const row = data?.[0];
           if (row?.id) {
-            const title = row?.gifts?.title;
-            return title || 'gift';
+            return {
+              title: row?.gifts?.title || 'gift',
+              description: row?.gifts?.description || null,
+              meta: row?.gifts?.meta || null,
+              opened_at: row?.opened_at || null,
+              open_id: row?.id || null,
+              gift_id: row?.gift_id || null,
+              client_op_id: row?.client_op_id || null,
+              reason: null
+            };
           }
         }
 

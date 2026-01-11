@@ -526,21 +526,73 @@
 }
 
 .utt-reward-card {
-  width: min(680px, calc(100vw - 28px));
+  width: min(860px, calc(100vw - 28px));
+  max-height: min(78vh, 720px);
   border-radius: 22px;
   border: 1px solid rgba(255, 255, 255, 0.10);
   background: rgba(18, 18, 18, 0.62);
   -webkit-backdrop-filter: blur(18px);
   backdrop-filter: blur(18px);
   box-shadow: 0 20px 70px rgba(0,0,0,0.40);
-  padding: 26px 22px;
+  padding: 28px 26px;
+  text-align: center;
+  overflow: auto;
+}
+
+.utt-reward-header {
   text-align: center;
 }
 
 .utt-reward-text {
-  font-size: 34px;
+  font-size: 44px;
   font-weight: 700;
   color: rgba(255, 255, 255, 0.96);
+  line-height: 1.08;
+}
+
+.utt-reward-desc {
+  margin-top: 12px;
+  font-size: 18px;
+  line-height: 1.6;
+  color: rgba(255, 255, 255, 0.78);
+}
+
+.utt-reward-details {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid rgba(255, 255, 255, 0.10);
+  display: grid;
+  gap: 8px;
+  text-align: left;
+}
+
+.utt-reward-detail-row {
+  display: grid;
+  grid-template-columns: 110px 1fr;
+  gap: 10px;
+  align-items: start;
+}
+
+.utt-reward-detail-label {
+  font-size: 12px;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.55);
+}
+
+.utt-reward-detail-value {
+  font-size: 13px;
+  line-height: 1.45;
+  color: rgba(255, 255, 255, 0.82);
+  overflow-wrap: anywhere;
+}
+
+.utt-reward-details-text {
+  font-size: 14px;
+  line-height: 1.6;
+  color: rgba(255, 255, 255, 0.82);
+  white-space: pre-line;
+  overflow-wrap: anywhere;
 }
 
 /* --- Wish modal (glass) --- */

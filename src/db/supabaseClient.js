@@ -90,4 +90,38 @@ export class SupabaseClientWrapper {
     if (error) throw new Error(error.message || 'Supabase insert failed');
     return true;
   }
+
+  // Manual fallback for gift opening when the Toolhouse agent fails/timeouts.
+  // Uses the DB-side preference logic (RPC) to pick + record an open.
+  async openGiftForUser({ user_id, client_op_id } = {}) {
+    if (!this.client) throw new SupabaseWriteError('Supabase not configured', { code: 'NOT_CONFIGURED' });
+
+    const uid = String(user_id || 'anonymous');
+    const cop = client_op_id != null && String(client_op_id).trim() ? String(client_op_id).trim() : null;
+
+    try {
+      const { data, error } = await this.client.rpc('open_gift_for_user', {
+        p_user_id: uid,
+        p_client_op_id: cop
+      });
+      if (error) {
+        const code = String(error.code || 'SUPABASE_RPC_ERROR');
+        throw new SupabaseWriteError(error.message || 'Supabase RPC failed', { code, cause: error });
+      }
+
+      const row = Array.isArray(data) ? data[0] : data;
+      return {
+        ok: true,
+        open_id: row?.open_id ?? null,
+        gift_id: row?.gift_id ?? null,
+        title: row?.gift_title ?? null,
+        description: row?.gift_description ?? null,
+        opened_at: row?.opened_at ?? null,
+        reason: row?.reason ?? null
+      };
+    } catch (e) {
+      if (e instanceof SupabaseWriteError) throw e;
+      throw new SupabaseWriteError('Supabase RPC failed', { code: 'NETWORK_OR_UNKNOWN', cause: e });
+    }
+  }
 }
