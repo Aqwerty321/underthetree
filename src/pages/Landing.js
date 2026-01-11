@@ -793,9 +793,11 @@ export async function mountLanding() {
         return opened || null;
       })().catch(() => null);
 
-      const showRewardFromResult = async ({ opened }) => {
-        // Always show a celebratory container immediately; update when data arrives.
-        await rewardOverlay?.show?.({ loading: true });
+      const showRewardFromResult = async ({ opened, assumeVisible = false }) => {
+        if (!assumeVisible) {
+          // Always show a celebratory container immediately; update when data arrives.
+          await rewardOverlay?.show?.({ loading: true });
+        }
 
         // Preferred: show from RPC/agent return (fast, reliable).
         if (opened && typeof opened === 'object' && (opened.title || opened.description || opened.open_id || opened.gift_id)) {
@@ -840,8 +842,9 @@ export async function mountLanding() {
 
         if (!skipRewardOverlay) {
           try {
+            await rewardOverlay?.show?.({ loading: true });
             const opened = await agentGiftPromise;
-            await showRewardFromResult({ opened });
+            await showRewardFromResult({ opened, assumeVisible: true });
           } catch {
             // Best-effort only.
           }
@@ -880,8 +883,9 @@ export async function mountLanding() {
 
         if (!skipRewardOverlay) {
           try {
+            await rewardOverlay?.show?.({ loading: true });
             const opened = await agentGiftPromise;
-            await showRewardFromResult({ opened });
+            await showRewardFromResult({ opened, assumeVisible: true });
           } catch {
             // Best-effort: no reward.
           }
@@ -896,8 +900,9 @@ export async function mountLanding() {
 
         if (!skipRewardOverlay) {
           try {
+            await rewardOverlay?.show?.({ loading: true });
             const opened = await agentGiftPromise;
-            await showRewardFromResult({ opened });
+            await showRewardFromResult({ opened, assumeVisible: true });
           } catch {
             // Best-effort only.
           }
