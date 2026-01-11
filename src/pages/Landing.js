@@ -272,72 +272,40 @@ export async function mountLanding() {
     const cop = client_op_id != null && String(client_op_id).trim() ? String(client_op_id).trim() : null;
     const startedAt = Date.now();
 
-    // 1) Prefer manual Supabase RPC (fastest + most reliable path). Silent on failure.
+    const localFallbackGifts = [
+      { title: 'Hot Cocoa Kit', description: 'A rich cocoa mix with mini marshmallows.' },
+      { title: 'Wool Mittens', description: 'Cozy wool mittens to keep your hands warm.' },
+      { title: 'Snowflake Ornament', description: 'A sparkling ornament for your tree.' },
+      { title: 'Storybook Collection', description: 'A bundle of bedtime stories for snowy nights.' },
+      { title: 'Mystery Key', description: 'A key that surely unlocks something someday.' },
+      { title: 'Cozy Blanket', description: 'A warm blanket for movie nights.' }
+    ];
+
+    // 1) Read-only pick from Supabase gifts table (proves DB connectivity).
     try {
       const elapsedMs = Date.now() - startedAt;
       const remainingMs = Math.max(1000, Number(timeoutMs || 0) - elapsedMs);
-      const r = await supabaseClient?.openGiftForUser?.({
-        user_id: uid,
-        client_op_id: cop,
-        timeoutMs: Math.min(8000, remainingMs)
-      });
-
-      if (r && (r.title || r.description || r.open_id || r.gift_id)) {
+      const r = await supabaseClient?.pickPublicGift?.({ timeoutMs: Math.min(3500, remainingMs) });
+      if (r && (r.title || r.description || r.gift_id)) {
         return {
-          source: 'supabase',
+          source: 'supabase_public',
           title: r?.title || null,
           description: r?.description || null,
-          opened_at: r?.opened_at || null,
-          reason: r?.reason || null,
-          open_id: r?.open_id || null,
+          opened_at: null,
+          reason: null,
+          open_id: null,
           gift_id: r?.gift_id || null,
           client_op_id: cop,
-          meta: null
+          meta: r?.meta || null
         };
       }
     } catch {
       // ignore
     }
 
-    // 2) Fallback: Toolhouse agent (bounty flow). Silent on failure.
-    try {
-      const raw = await callToolhouseAgentPayload(
-        {
-          command: 'OPEN_GIFT',
-          user_id: uid,
-          client_op_id: cop
-        },
-        { timeoutMs }
-      );
-
-      // Best-effort parse for title + structured errors.
-      try {
-        const parsed = JSON.parse(String(raw || ''));
-        if (parsed && parsed.ok === false) {
-          const code = parsed?.error?.code || 'AGENT_ERROR';
-          const msg = parsed?.error?.message || 'Agent returned ok=false';
-          throw new Error(`agent:${code}:${msg}`);
-        }
-
-        const open = parsed?.result?.open || parsed?.open || null;
-        const title = open?.title || open?.gift_title || null;
-        const description = open?.description || open?.gift_description || null;
-        const opened_at = open?.opened_at || null;
-        const reason = open?.reason || null;
-        const open_id = open?.open_id || open?.id || null;
-        const gift_id = open?.gift_id || null;
-        const meta = open?.meta || null;
-
-        return { source: 'toolhouse', title, description, opened_at, reason, open_id, gift_id, client_op_id: cop, meta };
-      } catch {
-        // If it's not JSON, still treat the request as successful (agent may have written to DB).
-        return { source: 'toolhouse', title: null, description: null };
-      }
-    } catch {
-      // Intentionally silent: do not toast specific Toolhouse timeout messages.
-    }
-
-    return { source: 'none', title: null, description: null };
+    // 2) Local fallback (always works).
+    const chosen = localFallbackGifts[Math.floor(Math.random() * localFallbackGifts.length)];
+    return { source: 'local_public', title: chosen.title, description: chosen.description };
   }
 
   const overlay = new StartOverlay({
@@ -385,6 +353,35 @@ export async function mountLanding() {
     uiLayer.className = 'utt-ui-layer';
     uiEl.appendChild(uiLayer);
 
+    pendingQueue = new PendingQueue({
+      telemetry,
+      onChange: () => {
+        pendingIndicator?.update?.();
+      },
+      onItemFailed: (op) => {
+        persistentQueueToast?.showFor?.(op);
+        pendingIndicator?.update?.();
+      }
+    });
+
+    pendingIndicator = new PendingIndicator({
+      parent: uiLayer,
+      queue: pendingQueue,
+      onRetryAll: async () => {
+        await processPendingQueue({ force: true });
+        pendingIndicator?.update?.();
+      }
+    });
+
+    persistentQueueToast = new PersistentQueueToast({
+      parent: document.body,
+      queue: pendingQueue,
+      onRetryAll: async () => {
+        await processPendingQueue({ force: true });
+        pendingIndicator?.update?.();
+      }
+    });
+
     rewardOverlay = new GiftRewardOverlay({ parent: document.body, config });
 
     // The gift open animation is replayed by the "More gifts" flow.
@@ -394,7 +391,6 @@ export async function mountLanding() {
     let skipNextGiftRewardOverlay = false;
 
     const processPendingQueue = async ({ force = false } = {}) => {
-      const before = pendingQueue?.getCounts?.()?.total ?? 0;
       await pendingQueue?.process?.({
         force,
         handlers: {
@@ -405,25 +401,30 @@ export async function mountLanding() {
             const is_public = Boolean(payload?.is_public);
             const client_op_id = String(payload?.client_op_id || '');
 
-            if (!text.trim()) throw new Error('non_retryable:empty_text');
             if (!client_op_id) throw new Error('non_retryable:missing_client_op_id');
 
-            const v = (await modelClient.request('VALIDATE_WISH', { text }, { timeoutMs: 10000, stream: false, clientOpId: client_op_id })).result;
-            if (!v.ok || !v.valid) {
-              const reason = Array.isArray(v.reasons) && v.reasons.length ? v.reasons.join('; ') : 'invalid';
-              throw new Error(`non_retryable:invalid_wish:${reason}`);
+            const v = (
+              await modelClient.request('VALIDATE_WISH', { text }, { timeoutMs: 10000, stream: false, clientOpId: client_op_id })
+            ).result;
+
+            if (!v?.valid) {
+              const reasons = Array.isArray(v?.reasons) ? v.reasons.filter(Boolean).join(', ') : 'invalid';
+              throw new Error(`non_retryable:invalid:${reasons || 'invalid'}`);
             }
 
-            const wishText = v.sanitized_text || text;
-            const created = (await modelClient.request(
-              'CREATE_WISH_PAYLOAD',
-              { user_id, text: wishText, is_public },
-              { timeoutMs: 10000, stream: false, clientOpId: client_op_id }
-            )).result;
+            const sanitized_text = v?.sanitized_text != null ? String(v.sanitized_text) : text;
 
-            if (!created.ok) {
-              const code = created.error_code || 'MODEL_ERROR';
-              const msg = created.error_msg || 'Model rejected payload';
+            const created = (
+              await modelClient.request(
+                'CREATE_WISH_PAYLOAD',
+                { user_id, text: sanitized_text, is_public },
+                { timeoutMs: 10000, stream: false, clientOpId: client_op_id }
+              )
+            ).result;
+
+            if (!created?.ok) {
+              const code = created?.error_code || 'MODEL_REJECTED';
+              const msg = created?.error_msg || 'Model rejected payload';
               throw new Error(`non_retryable:${code}:${msg}`);
             }
 
@@ -431,47 +432,9 @@ export async function mountLanding() {
           }
         }
       });
-      const after = pendingQueue?.getCounts?.()?.total ?? 0;
-      const drained = Math.max(0, before - after);
-      if (drained > 0) toast.show(`Synced ${drained} wish${drained === 1 ? '' : 'es'}`);
+
+      pendingIndicator?.update?.();
     };
-
-    // Pending queue + indicator (always mounted; hidden unless needed).
-    persistentQueueToast = new PersistentQueueToast({
-      parent: document.body,
-      queue: null,
-      onRetryAll: async () => {
-        await processPendingQueue({ force: true });
-      }
-    });
-
-    pendingQueue = new PendingQueue({
-      telemetry,
-      onChange: () => {
-        pendingIndicator?.update();
-      },
-      onItemFailed: (op) => {
-        // Persistent remediation required by spec.
-        persistentQueueToast?.showFor(op);
-      }
-    });
-
-    // Patch the toast's queue reference now that pendingQueue exists.
-    persistentQueueToast.queue = pendingQueue;
-
-    pendingIndicator = new PendingIndicator({
-      parent: uiLayer,
-      queue: pendingQueue,
-      onRetryAll: async () => {
-        await processPendingQueue({ force: true });
-      }
-    });
-
-    // Process queue on start and on reconnect.
-    processPendingQueue();
-    window.addEventListener('online', () => {
-      processPendingQueue();
-    });
 
     // Wish modal
     wishModal = new WishModal({

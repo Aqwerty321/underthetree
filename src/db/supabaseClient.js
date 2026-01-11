@@ -32,10 +32,48 @@ export class SupabaseClientWrapper {
   constructor({ telemetry } = {}) {
     this.telemetry = telemetry;
     this.client = createSupabaseClient();
+    // Cache whether the DB RPC exists/works in the current project.
+    // Values: 'unknown' | 'ok' | 'broken'
+    this._openGiftRpcState = 'unknown';
   }
 
   isConfigured() {
     return Boolean(this.client);
+  }
+
+  // Read-only: pick a random public gift from the catalog.
+  // This avoids RPC + insert permissions and is useful as a "proof the DB is connected" path.
+  async pickPublicGift({ timeoutMs = 3500 } = {}) {
+    if (!this.client) throw new SupabaseWriteError('Supabase not configured', { code: 'NOT_CONFIGURED' });
+
+    const startedAt = Date.now();
+    const remainingMs = () => Math.max(1000, timeoutMs - (Date.now() - startedAt));
+    const raceTimeout = (promise, ms, code) =>
+      Promise.race([
+        promise,
+        new Promise((_, reject) => setTimeout(() => reject(new Error(code || 'timeout')), Math.max(1000, ms)))
+      ]);
+
+    const res = await raceTimeout(
+      this.client.from('gifts').select('id, title, description, meta').eq('public', true).limit(200),
+      remainingMs(),
+      'supabase_pick_public_gift_timeout'
+    );
+    if (res?.error) {
+      const code = String(res.error.code || 'SUPABASE_SELECT_FAILED');
+      throw new SupabaseWriteError(res.error.message || 'Supabase select failed', { code, cause: res.error });
+    }
+
+    const gifts = Array.isArray(res?.data) ? res.data : [];
+    if (!gifts.length) return { ok: false, reason: 'no_public_gifts' };
+    const chosen = gifts[Math.floor(Math.random() * gifts.length)];
+    return {
+      ok: true,
+      gift_id: chosen?.id ?? null,
+      title: chosen?.title ?? null,
+      description: chosen?.description ?? null,
+      meta: chosen?.meta ?? null
+    };
   }
 
   // Accepts validated payload (user_id, text, is_public, tags, summary)
@@ -193,6 +231,12 @@ export class SupabaseClientWrapper {
     };
 
     try {
+      // If we've already learned that the RPC is broken in this Supabase project,
+      // skip it entirely and use the direct-table fallback.
+      if (this._openGiftRpcState === 'broken') {
+        return await directOpenFallback();
+      }
+
       // Primary (newer) param names.
       let { data, error } = await callRpc({ p_user_id: uid, p_client_op_id: cop });
 
@@ -218,6 +262,7 @@ export class SupabaseClientWrapper {
         const code = String(error.code || '');
         const notFound = code === '404' || /not found/i.test(msg);
         if (notFound) {
+          this._openGiftRpcState = 'broken';
           return await directOpenFallback();
         }
       }
@@ -228,6 +273,7 @@ export class SupabaseClientWrapper {
         const code = String(error.code || '');
         const badRequest = code === '400' || code.startsWith('PGRST') || /bad request/i.test(msg);
         if (badRequest) {
+          this._openGiftRpcState = 'broken';
           return await directOpenFallback();
         }
       }
@@ -236,6 +282,9 @@ export class SupabaseClientWrapper {
         const code = String(error.code || 'SUPABASE_RPC_ERROR');
         throw new SupabaseWriteError(error.message || 'Supabase RPC failed', { code, cause: error });
       }
+
+      // RPC worked at least once in this session.
+      this._openGiftRpcState = 'ok';
 
       const row = Array.isArray(data) ? data[0] : data;
       let result = {
