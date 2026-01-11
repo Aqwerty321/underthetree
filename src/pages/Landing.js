@@ -239,7 +239,34 @@ export async function mountLanding() {
     const cop = client_op_id != null && String(client_op_id).trim() ? String(client_op_id).trim() : null;
     const startedAt = Date.now();
 
-    // 1) Try Toolhouse agent (preferred for the bounty flow).
+    // 1) Prefer manual Supabase RPC (fastest + most reliable path). Silent on failure.
+    try {
+      const elapsedMs = Date.now() - startedAt;
+      const remainingMs = Math.max(1000, Number(timeoutMs || 0) - elapsedMs);
+      const r = await supabaseClient?.openGiftForUser?.({
+        user_id: uid,
+        client_op_id: cop,
+        timeoutMs: Math.min(8000, remainingMs)
+      });
+
+      if (r && (r.title || r.description || r.open_id || r.gift_id)) {
+        return {
+          source: 'supabase',
+          title: r?.title || null,
+          description: r?.description || null,
+          opened_at: r?.opened_at || null,
+          reason: r?.reason || null,
+          open_id: r?.open_id || null,
+          gift_id: r?.gift_id || null,
+          client_op_id: cop,
+          meta: null
+        };
+      }
+    } catch {
+      // ignore
+    }
+
+    // 2) Fallback: Toolhouse agent (bounty flow). Silent on failure.
     try {
       const raw = await callToolhouseAgentPayload(
         {
@@ -277,29 +304,7 @@ export async function mountLanding() {
       // Intentionally silent: do not toast specific Toolhouse timeout messages.
     }
 
-    // 2) Manual CRUD fallback: call Supabase RPC directly.
-    try {
-      const elapsedMs = Date.now() - startedAt;
-      const remainingMs = Math.max(1000, Number(timeoutMs || 0) - elapsedMs);
-      const r = await supabaseClient?.openGiftForUser?.({
-        user_id: uid,
-        client_op_id: cop,
-        timeoutMs: Math.min(8000, remainingMs)
-      });
-      return {
-        source: 'supabase',
-        title: r?.title || null,
-        description: r?.description || null,
-        opened_at: r?.opened_at || null,
-        reason: r?.reason || null,
-        open_id: r?.open_id || null,
-        gift_id: r?.gift_id || null,
-        client_op_id: cop,
-        meta: null
-      };
-    } catch {
-      return { source: 'none', title: null, description: null };
-    }
+    return { source: 'none', title: null, description: null };
   }
 
   const overlay = new StartOverlay({
@@ -691,9 +696,13 @@ export async function mountLanding() {
             // 3) After animation completes (reveal), show the reward immediately.
             try {
               await waitForRuntimeState(runtime, 'reveal', 25000);
+
+              // Show container immediately; update as soon as we have data.
+              await rewardOverlay?.show?.({ loading: true });
+
               // Preferred: show from RPC/agent return (fast, reliable).
               if (opened && typeof opened === 'object' && (opened.title || opened.description || opened.open_id || opened.gift_id)) {
-                await rewardOverlay?.show?.({
+                rewardOverlay?.update?.({
                   title: opened.title || 'gift',
                   description: opened.description || null,
                   meta: opened.meta || null,
@@ -704,7 +713,7 @@ export async function mountLanding() {
                   reason: opened.reason || null,
                   show_debug: false
                 });
-                return;
+                if (opened.title || opened.description) return;
               }
 
               // Fallback: short poll to enrich, but never block the celebration.
@@ -712,7 +721,7 @@ export async function mountLanding() {
                 (await waitForNewGiftByClientOpId({ client_op_id, supabaseClient, timeoutMs: 4000 }).catch(() => null)) ||
                 (await waitForNewGift({ user_id, supabaseClient, lastSeenId, timeoutMs: 4000 }).catch(() => null));
 
-              await rewardOverlay?.show?.({
+              rewardOverlay?.update?.({
                 title: gift?.title || 'gift',
                 description: gift?.description || null,
                 meta: gift?.meta || null,
@@ -785,9 +794,12 @@ export async function mountLanding() {
       })().catch(() => null);
 
       const showRewardFromResult = async ({ opened }) => {
+        // Always show a celebratory container immediately; update when data arrives.
+        await rewardOverlay?.show?.({ loading: true });
+
         // Preferred: show from RPC/agent return (fast, reliable).
         if (opened && typeof opened === 'object' && (opened.title || opened.description || opened.open_id || opened.gift_id)) {
-          await rewardOverlay?.show?.({
+          rewardOverlay?.update?.({
             title: opened.title || 'gift',
             description: opened.description || null,
             meta: opened.meta || null,
@@ -798,7 +810,8 @@ export async function mountLanding() {
             reason: opened.reason || null,
             show_debug: false
           });
-          return;
+          // If we still don't have a real title, try a short enrich poll.
+          if (opened.title || opened.description) return;
         }
 
         // Fallback: short poll to enrich, but never block the celebration.
@@ -807,7 +820,7 @@ export async function mountLanding() {
             ? await waitForNewGiftByClientOpId({ client_op_id, supabaseClient, timeoutMs: 4000 }).catch(() => null)
             : null) || (await waitForNewGift({ user_id, supabaseClient, lastSeenId, timeoutMs: 4000 }).catch(() => null));
 
-        await rewardOverlay?.show?.({
+        rewardOverlay?.update?.({
           title: gift?.title || 'gift',
           description: gift?.description || null,
           meta: gift?.meta || null,

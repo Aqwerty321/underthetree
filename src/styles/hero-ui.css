@@ -536,7 +536,24 @@
   box-shadow: 0 20px 70px rgba(0,0,0,0.40);
   padding: 28px 26px;
   text-align: center;
-  overflow: auto;
+  overflow: hidden;
+  position: relative;
+}
+
+@keyframes uttRewardGlint {
+  0% { transform: translateX(-70%) rotate(12deg); }
+  100% { transform: translateX(140%) rotate(12deg); }
+}
+
+.utt-reward-card.utt-loading::after {
+  content: '';
+  position: absolute;
+  inset: -40% -60%;
+  background: linear-gradient(90deg, transparent 35%, rgba(255, 255, 255, 0.10) 50%, transparent 65%);
+  opacity: 0.85;
+  pointer-events: none;
+  transform: translateX(-70%) rotate(12deg);
+  animation: uttRewardGlint 1.15s linear infinite;
 }
 
 .utt-reward-header {
@@ -572,6 +589,8 @@
   display: grid;
   gap: 8px;
   text-align: left;
+  max-height: 40vh;
+  overflow: auto;
 }
 
 .utt-reward-detail-row {

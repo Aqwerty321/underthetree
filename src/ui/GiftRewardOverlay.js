@@ -82,6 +82,9 @@ function flattenMetaToLines(meta) {
 }
 
 function buildDetailRows(item) {
+  const showDebug = Boolean(item?.show_debug);
+  if (!showDebug) return [];
+
   const rows = [];
 
   const openedAt = formatIso(item?.opened_at);
@@ -100,9 +103,6 @@ function buildDetailRows(item) {
   const giftId = item?.gift_id;
   if (giftId) rows.push({ label: 'Gift ID', value: String(giftId) });
 
-  // Client op id is useful for debugging, but not celebratory.
-  // Only show it when explicitly requested.
-  const showDebug = Boolean(item?.show_debug);
   const clientOpId = item?.client_op_id;
   if (showDebug && clientOpId) rows.push({ label: 'Client Op', value: String(clientOpId) });
 
@@ -165,6 +165,44 @@ export class GiftRewardOverlay {
     this._wire();
   }
 
+  _render(item) {
+    const obj = item && typeof item === 'object' ? item : {};
+    const isLoading = Boolean(obj.loading);
+
+    this.card.classList.toggle('utt-loading', isLoading);
+
+    if (isLoading) {
+      this.kicker.textContent = 'Opening…';
+      this.text.textContent = 'Unwrapping your gift';
+      this.desc.textContent = '';
+      this.desc.classList.add('utt-hidden');
+      this.details.classList.add('utt-hidden');
+      return;
+    }
+
+    this.kicker.textContent = 'Congratulations!';
+    const title = typeof item === 'string' ? item : obj.title;
+    const description = typeof item === 'string' ? null : obj.description;
+
+    const t = String(title || 'gift');
+    const article = /^[aeiou]/i.test(t.trim()) ? 'an' : 'a';
+    this.text.textContent = `You got ${article} ${t}!`;
+    this.desc.textContent = description ? String(description) : '';
+    this.desc.classList.toggle('utt-hidden', !description);
+
+    // Details block (debug-only). Hide when empty.
+    this.details.innerHTML = '';
+    if (obj && typeof obj === 'object') {
+      const rows = buildDetailRows(obj);
+      const lines = rows.map((r) => `${r.label}: ${r.value}`);
+      this.detailsText.textContent = lines.join('\n');
+      this.details.appendChild(this.detailsText);
+      this.details.classList.toggle('utt-hidden', lines.length === 0);
+    } else {
+      this.details.classList.add('utt-hidden');
+    }
+  }
+
   _wire() {
     this.backdrop.addEventListener('pointerdown', (e) => {
       if (e.target === this.backdrop) this.close();
@@ -177,28 +215,10 @@ export class GiftRewardOverlay {
   }
 
   async show(item) {
-    const title = typeof item === 'string' ? item : item?.title;
-    const description = typeof item === 'string' ? null : item?.description;
+    this._render(item);
 
-    const t = String(title || 'gift');
-    const article = /^[aeiou]/i.test(t.trim()) ? 'an' : 'a';
-    this.text.textContent = `You got ${article} ${t}!`;
-    this.desc.textContent = description ? String(description) : '';
-    this.desc.classList.toggle('utt-hidden', !description);
-
-    // Details block (best-effort). Hide when empty.
-    this.details.innerHTML = '';
-    if (item && typeof item === 'object') {
-      const rows = buildDetailRows(item);
-
-      // Build a readable multi-line block (no raw JSON).
-      const lines = rows.map((r) => `${r.label}: ${r.value}`);
-      this.detailsText.textContent = lines.join('\n');
-      this.details.appendChild(this.detailsText);
-      this.details.classList.toggle('utt-hidden', lines.length === 0);
-    } else {
-      this.details.classList.add('utt-hidden');
-    }
+    // If already open, just update content (no re-fade).
+    if (this._open) return;
 
     this._open = true;
 
@@ -207,6 +227,11 @@ export class GiftRewardOverlay {
     this.backdrop.style.pointerEvents = 'auto';
     this.backdrop.classList.add('utt-visible');
     await transitionOpacity(this.backdrop, 1, 220, this.config.easing.easeOutCubic);
+  }
+
+  update(item) {
+    if (!this._open) return;
+    this._render(item);
   }
 
   async close() {

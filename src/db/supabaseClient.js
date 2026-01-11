@@ -99,6 +99,8 @@ export class SupabaseClientWrapper {
     const uid = String(user_id || 'anonymous');
     const cop = client_op_id != null && String(client_op_id).trim() ? String(client_op_id).trim() : null;
 
+    const startedAt = Date.now();
+
     try {
       const rpcPromise = this.client.rpc('open_gift_for_user', {
         p_user_id: uid,
@@ -115,7 +117,7 @@ export class SupabaseClientWrapper {
       }
 
       const row = Array.isArray(data) ? data[0] : data;
-      return {
+      let result = {
         ok: true,
         open_id: row?.open_id ?? null,
         gift_id: row?.gift_id ?? null,
@@ -124,6 +126,32 @@ export class SupabaseClientWrapper {
         opened_at: row?.opened_at ?? null,
         reason: row?.reason ?? null
       };
+
+      // Best-effort: if the RPC response is missing title/description but we have a gift_id,
+      // attempt to fetch the gift record directly (can help when RPC return shape differs).
+      if ((!result.title || !result.description) && result.gift_id) {
+        try {
+          const elapsedMs = Date.now() - startedAt;
+          const remainingMs = Math.max(1000, timeoutMs - elapsedMs);
+          const selectPromise = this.client
+            .from('gifts')
+            .select('title, description')
+            .eq('id', result.gift_id)
+            .limit(1);
+
+          const { data: giftRows } = await Promise.race([
+            selectPromise,
+            new Promise((_, reject) => setTimeout(() => reject(new Error('supabase_select_timeout')), Math.min(2500, remainingMs)))
+          ]);
+          const gift = giftRows?.[0];
+          if (!result.title && gift?.title) result.title = gift.title;
+          if (!result.description && gift?.description) result.description = gift.description;
+        } catch {
+          // ignore
+        }
+      }
+
+      return result;
     } catch (e) {
       if (e instanceof SupabaseWriteError) throw e;
       throw new SupabaseWriteError('Supabase RPC failed', { code: 'NETWORK_OR_UNKNOWN', cause: e });
