@@ -176,7 +176,7 @@ export const config = {
 
     // SFX (HTMLAudio). Separate from the WebAudio soundscape gains.
     sfx: {
-      clickGain: 0.9,
+      clickGain: 0.75,
       fanfareGain: 1.0,
       giftLidOffGain: 1.0
     }

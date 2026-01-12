@@ -1,5 +1,5 @@
 // src/ui/GiftRewardOverlay.js
-// Simple centered overlay: "You got an <item>".
+// Simple centered overlay: "You got <item>".
 
 function transitionOpacity(el, to, ms, easing) {
   return new Promise((resolve) => {
@@ -185,8 +185,7 @@ export class GiftRewardOverlay {
     const description = typeof item === 'string' ? null : obj.description;
 
     const t = String(title || 'gift');
-    const article = /^[aeiou]/i.test(t.trim()) ? 'an' : 'a';
-    this.text.textContent = `You got ${article} ${t}!`;
+    this.text.textContent = `You got ${t}!`;
     this.desc.textContent = description ? String(description) : '';
     this.desc.classList.toggle('utt-hidden', !description);
 
