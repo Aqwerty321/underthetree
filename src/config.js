@@ -7,7 +7,10 @@ export const config = {
   assets: {
     audio: {
       fire: '/assets/audio/fire_cackle_loop.mp3',
-      room: '/assets/audio/room_ambience_loop.mp3'
+      room: '/assets/audio/room_ambience_loop.mp3',
+      click: '/assets/audio/click.mp3',
+      fanfare: '/assets/audio/fanfare.mp3',
+      giftLidOff: '/assets/audio/gift_lid_off.mp3'
     },
     hero: {
       color2k: '/assets/visuals/hero/color/hero_bg_2k.webp',
@@ -169,7 +172,14 @@ export const config = {
     masterGain: 0.9,
     roomTargetGain: 0.6,
     fireTargetGain: 0.8,
-    fireModDepth: 0.03
+    fireModDepth: 0.03,
+
+    // SFX (HTMLAudio). Separate from the WebAudio soundscape gains.
+    sfx: {
+      clickGain: 0.9,
+      fanfareGain: 1.0,
+      giftLidOffGain: 1.0
+    }
   },
 
   // Accessibility

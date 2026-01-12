@@ -7,6 +7,7 @@ import { wait, withTimeout } from '../utils/syncUtils.js';
 import { HeroRenderer } from '../scene/HeroRenderer.js';
 import { GiftParallaxRenderer } from '../three/GiftParallaxRenderer.js';
 import { Soundscape } from '../audio/Soundscape.js';
+import { SfxManager } from '../audio/SfxManager.js';
 import { StartOverlay } from '../ui/StartOverlay.js';
 import { DebugPanel } from '../ui/DebugPanel.js';
 import { HeroCard } from '../ui/HeroCard.js';
@@ -23,6 +24,8 @@ import { PersistentQueueToast } from '../ui/wish/PersistentQueueToast.js';
 import { GiftRewardOverlay } from '../ui/GiftRewardOverlay.js';
 import { callToolhouseAgentPayload, ToolhouseAgentError } from '../toolhouse/agentClient.js';
 import { getOrCreateAnonUserId } from '../utils/anonUserId.js';
+import { submitWishToToolhouseAgent } from '../toolhouse/wishWriter.js';
+import { WishFlowMonitor } from '../ui/wish/WishFlowMonitor.js';
 
 function clamp(v, lo, hi) {
   return Math.min(hi, Math.max(lo, v));
@@ -213,6 +216,19 @@ export async function mountLanding() {
   const persistedMute = window.localStorage.getItem(config.storageKeys.muted);
   if (persistedMute != null) runtime.muted = persistedMute === 'true';
 
+  const sfx = new SfxManager({ config, runtime });
+  sfx.setMuted(runtime.muted);
+
+  // Global UI click SFX: plays on every <button> click (per spec).
+  // Use capture so we still get clicks even if propagation is stopped.
+  const onGlobalButtonClick = (e) => {
+    const btn = e?.target?.closest?.('button');
+    if (!btn) return;
+    if (btn.disabled) return;
+    sfx.playClick();
+  };
+  document.addEventListener('click', onGlobalButtonClick, true);
+
   let heroRenderer = null;
   let giftRenderer = null;
   let soundscape = null;
@@ -327,6 +343,7 @@ export async function mountLanding() {
       runtime.muted = muted;
       window.localStorage.setItem(config.storageKeys.muted, String(muted));
       soundscape?.setMuted(muted);
+      sfx?.setMuted?.(muted);
     },
     onInteractionFocusChange: (isFocused) => {
       heroRenderer?.setInteractionFocus(isFocused);
@@ -384,6 +401,12 @@ export async function mountLanding() {
       }
     });
 
+    // Debug: live wish/queue monitor (enabled by ?debug=true).
+    let wishMonitor = null;
+    if (debugEnabled) {
+      wishMonitor = new WishFlowMonitor({ parent: document.body, telemetry, queue: pendingQueue, debugEnabled });
+    }
+
     persistentQueueToast = new PersistentQueueToast({
       parent: document.body,
       queue: pendingQueue,
@@ -439,7 +462,41 @@ export async function mountLanding() {
               throw new Error(`non_retryable:${code}:${msg}`);
             }
 
-            await supabaseClient.createWishFromQueue({ ...created.db_payload, id: client_op_id, synced: true });
+            // Primary path: Toolhouse Agent performs the DB write server-side (avoids RLS/auth issues).
+            try {
+              telemetry?.emit?.('wish_toolhouse_write_start', { client_op_id, is_public });
+              await submitWishToToolhouseAgent({ db_payload: created.db_payload, client_op_id, timeoutMs: 15000 });
+
+              // Best-effort: confirm row exists (may be blocked by RLS).
+              const confirm = await supabaseClient
+                .waitForWishById({ id: client_op_id, timeoutMs: 4500 })
+                .catch(() => ({ ok: false, reason: 'error' }));
+              telemetry?.emit?.('wish_toolhouse_write_ok', {
+                client_op_id,
+                confirmed: Boolean(confirm?.ok),
+                confirm_reason: confirm?.ok ? null : confirm?.reason || null
+              });
+              return;
+            } catch (e) {
+              telemetry?.emit?.('wish_toolhouse_write_fail', { client_op_id, error: String(e?.message || e || 'error') });
+              // If Toolhouse isn't configured server-side, fall back to client-side insert.
+              // (This may still fail under RLS; in that case the queue will retry/mark failed.)
+              const msg = String(e?.message || e || 'toolhouse_failed');
+              if (msg.includes('NOT_CONFIGURED') || msg.includes('toolhouse_agent_not_configured')) {
+                await supabaseClient.createWishFromQueue({ ...created.db_payload, id: client_op_id, synced: true });
+
+                const confirm = await supabaseClient
+                  .waitForWishById({ id: client_op_id, timeoutMs: 4500 })
+                  .catch(() => ({ ok: false, reason: 'error' }));
+                telemetry?.emit?.('wish_supabase_write_ok', {
+                  client_op_id,
+                  confirmed: Boolean(confirm?.ok),
+                  confirm_reason: confirm?.ok ? null : confirm?.reason || null
+                });
+                return;
+              }
+              throw e;
+            }
           }
         }
       });
@@ -473,6 +530,7 @@ export async function mountLanding() {
         runtime.muted = muted;
         window.localStorage.setItem(config.storageKeys.muted, String(muted));
         soundscape?.setMuted(muted);
+        sfx?.setMuted?.(muted);
       },
       onReducedMotionChange: (enabled) => {
         runtime.userReducedMotion = enabled;
@@ -500,8 +558,10 @@ export async function mountLanding() {
         window.localStorage.setItem(config.storageKeys.muted, 'true');
         overlay.setMuted(true);
         soundscape.setMuted(true);
+        sfx.setMuted(true);
       } else {
         soundscape.setMuted(runtime.muted);
+        sfx.setMuted(runtime.muted);
       }
 
       const heroFadeEndSec = config.timeline?.heroFade?.end ?? 0;
@@ -650,11 +710,13 @@ export async function mountLanding() {
           parent: document.body,
           config,
           runtime,
+          sfx,
           initialMuted: runtime.muted,
           onMuteChange: (muted) => {
             runtime.muted = muted;
             window.localStorage.setItem(config.storageKeys.muted, String(muted));
             soundscape?.setMuted(muted);
+            sfx?.setMuted?.(muted);
           },
           onOpenGift: async () => {
             await startGiftOpenFlow();
@@ -751,6 +813,7 @@ export async function mountLanding() {
             config,
             runtime,
             giftRenderer,
+            sfx,
             className: 'utt-video-layers utt-confetti-front'
           });
 

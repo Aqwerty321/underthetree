@@ -705,6 +705,72 @@
   overflow: hidden;
 }
 
+/* Debug-only: wish flow monitor */
+.utt-wish-debug {
+  position: fixed;
+  top: 14px;
+  right: 14px;
+  z-index: 140;
+  width: min(520px, calc(100vw - 28px));
+  max-height: min(48vh, 520px);
+  overflow: hidden;
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  background: rgba(10, 10, 10, 0.42);
+  -webkit-backdrop-filter: blur(14px);
+  backdrop-filter: blur(14px);
+  box-shadow: 0 18px 60px rgba(0,0,0,0.35);
+  padding: 10px 10px;
+}
+
+.utt-wish-debug-title {
+  font-size: 12px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  opacity: 0.9;
+}
+
+.utt-wish-debug-meta {
+  margin-top: 6px;
+  font-size: 12px;
+  opacity: 0.72;
+}
+
+.utt-wish-debug-actions {
+  margin-top: 8px;
+  display: flex;
+  gap: 8px;
+}
+
+.utt-wish-debug-btn {
+  appearance: none;
+  border: 1px solid rgba(255,255,255,0.12);
+  background: rgba(255,255,255,0.06);
+  color: rgba(255,255,255,0.88);
+  border-radius: 12px;
+  padding: 6px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.utt-wish-debug-btn:hover {
+  background: rgba(255,255,255,0.10);
+}
+
+.utt-wish-debug-log {
+  margin-top: 8px;
+  padding: 10px 10px;
+  border-radius: 12px;
+  border: 1px solid rgba(255,255,255,0.08);
+  background: rgba(0,0,0,0.28);
+  color: rgba(255,255,255,0.86);
+  font-size: 11px;
+  line-height: 1.4;
+  overflow: auto;
+  max-height: 30vh;
+  white-space: pre;
+}
+
 .utt-wish-progress {
   height: 8px;
   background: rgba(255,255,255,0.05);

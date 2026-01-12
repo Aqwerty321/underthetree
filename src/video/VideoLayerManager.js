@@ -43,11 +43,12 @@ function makeVideo({ url, className }) {
 }
 
 export class VideoLayerManager {
-  constructor({ parent, config, runtime, giftRenderer, className } = {}) {
+  constructor({ parent, config, runtime, giftRenderer, sfx, className } = {}) {
     this.parent = parent;
     this.config = config;
     this.runtime = runtime;
     this.giftRenderer = giftRenderer;
+    this.sfx = sfx;
 
     this._domRoot = document.createElement('div');
     this._domRoot.className = className || 'utt-video-layers';
@@ -118,6 +119,9 @@ export class VideoLayerManager {
 
     await this._safePlay(this._confetti);
     this._confettiStarted = true;
+
+    // SFX: fanfare plays when confetti starts.
+    this.sfx?.playFanfare?.();
 
     // Fade confetti in quickly.
     if (this._usingWebGL && this.giftRenderer) {
@@ -190,6 +194,9 @@ export class VideoLayerManager {
 
     await this._safePlay(this._confetti);
     this._confettiStarted = true;
+
+    // SFX: fanfare plays when confetti starts.
+    this.sfx?.playFanfare?.();
 
     // Playback rate ramp: linear from start -> end until the video ends.
     try {
@@ -264,6 +271,8 @@ export class VideoLayerManager {
 
     this._confetti = this._confetti ?? makeVideo({ url: confettiUrl, className: 'utt-alpha-video utt-confetti' });
 
+    let fanfarePlayed = false;
+
     // Ensure initial opacity state.
     this._confetti.style.opacity = '0';
 
@@ -285,6 +294,13 @@ export class VideoLayerManager {
       }
 
       await this._safePlay(this._confetti);
+
+      // SFX: fanfare plays when confetti starts.
+      // For looping confetti, only play it once per playConfettiUntil() call.
+      if (!fanfarePlayed) {
+        fanfarePlayed = true;
+        this.sfx?.playFanfare?.();
+      }
     };
 
     await startOne();

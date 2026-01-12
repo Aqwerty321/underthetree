@@ -129,6 +129,38 @@ export class SupabaseClientWrapper {
     return true;
   }
 
+  // Best-effort client-side confirmation that a wish row exists.
+  // Note: this will only succeed if your RLS allows selects for the current anon context.
+  async waitForWishById({ id, timeoutMs = 4500 } = {}) {
+    if (!this.client) throw new SupabaseWriteError('Supabase not configured', { code: 'NOT_CONFIGURED' });
+    const wishId = id != null ? String(id).trim() : '';
+    if (!wishId) throw new Error('missing_wish_id');
+
+    const start = performance.now();
+    while (performance.now() - start < timeoutMs) {
+      const { data, error, status } = await this.client
+        .from('wishes')
+        .select('id, created_at, user_id, is_public')
+        .eq('id', wishId)
+        .limit(1);
+
+      if (error) {
+        // Common when RLS blocks anon reads.
+        if (status === 401 || status === 403) return { ok: false, reason: 'no_read_access' };
+        // Non-retryable select error.
+        if (status === 400) return { ok: false, reason: 'bad_request' };
+        // Retryable-ish: wait and try again.
+      } else {
+        const row = Array.isArray(data) ? data[0] : data;
+        if (row?.id) return { ok: true, row };
+      }
+
+      await new Promise((r) => setTimeout(r, 650));
+    }
+
+    return { ok: false, reason: 'timeout' };
+  }
+
   // Manual fallback for gift opening when the Toolhouse agent fails/timeouts.
   // Uses the DB-side preference logic (RPC) to pick + record an open.
   async openGiftForUser({ user_id, client_op_id, timeoutMs = 8000 } = {}) {

@@ -4,6 +4,11 @@
 import { createGlassButton } from '../GlassButton.js';
 import { sanitizeWishText } from '../../wish/sanitize.js';
 import { getOrCreateAnonUserId } from '../../utils/anonUserId.js';
+import { submitWishToToolhouseAgent } from '../../toolhouse/wishWriter.js';
+
+function wait(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
 
 function transitionOpacity(el, to, ms, easing) {
   return new Promise((resolve) => {
@@ -280,7 +285,18 @@ export class WishModal {
             throw new Error(`non_retryable:${code}:${msg}`);
           }
 
-          await this.supabaseClient.createWishFromQueue({ ...created.db_payload, id: client_op_id, synced: true });
+          // Primary path: Toolhouse Agent performs the DB write server-side.
+          try {
+            await submitWishToToolhouseAgent({ db_payload: created.db_payload, client_op_id, timeoutMs: 15000 });
+            return;
+          } catch (e) {
+            const msg = String(e?.message || e || 'toolhouse_failed');
+            if (msg.includes('NOT_CONFIGURED') || msg.includes('toolhouse_agent_not_configured')) {
+              await this.supabaseClient.createWishFromQueue({ ...created.db_payload, id: client_op_id, synced: true });
+              return;
+            }
+            throw e;
+          }
         }
       }
     });
@@ -429,7 +445,46 @@ export class WishModal {
 
       // DB write: if it fails, enqueue and inform.
       try {
-        await this.supabaseClient.createWish(modelOut.db_payload, { clientOpId: client_op_id });
+        try {
+          this.telemetry?.emit?.('wish_toolhouse_write_start', { client_op_id, is_public });
+          await submitWishToToolhouseAgent({ db_payload: modelOut.db_payload, client_op_id, timeoutMs: 15000 });
+
+          // Best-effort confirmation (may fail under RLS/no-auth).
+          const confirm = await this.supabaseClient
+            .waitForWishById({ id: client_op_id, timeoutMs: 3500 })
+            .catch(() => ({ ok: false, reason: 'error' }));
+          this.telemetry?.emit?.('wish_toolhouse_write_ok', {
+            client_op_id,
+            confirmed: Boolean(confirm?.ok),
+            confirm_reason: confirm?.ok ? null : confirm?.reason || null
+          });
+
+          // UX: if confirmation is possible, show it briefly.
+          if (confirm?.ok) {
+            this.status.textContent = 'Wish recorded ✓';
+          }
+        } catch (e) {
+          const msg = String(e?.message || e || 'toolhouse_failed');
+          if (msg.includes('NOT_CONFIGURED') || msg.includes('toolhouse_agent_not_configured')) {
+            await this.supabaseClient.createWish(modelOut.db_payload, { clientOpId: client_op_id });
+
+            const confirm = await this.supabaseClient
+              .waitForWishById({ id: client_op_id, timeoutMs: 3500 })
+              .catch(() => ({ ok: false, reason: 'error' }));
+            this.telemetry?.emit?.('wish_supabase_write_ok', {
+              client_op_id,
+              confirmed: Boolean(confirm?.ok),
+              confirm_reason: confirm?.ok ? null : confirm?.reason || null
+            });
+
+            if (confirm?.ok) {
+              this.status.textContent = 'Wish recorded ✓';
+            }
+          } else {
+            this.telemetry?.emit?.('wish_toolhouse_write_fail', { client_op_id, error: msg });
+            throw e;
+          }
+        }
       } catch (e) {
         const enqueueOp = e?.enqueueOp;
         if (enqueueOp) this.queue?.enqueue?.(enqueueOp);
@@ -447,7 +502,11 @@ export class WishModal {
       this._clearTimers();
       clearTimeout(capId);
       this._setProgress({ mode: 'success' });
-      this.status.textContent = 'Wish sent!';
+      // If we already set a confirmation string above, keep it.
+      if (!this.status.textContent) this.status.textContent = 'Wish sent!';
+
+      // Let users read the status for a moment.
+      await wait(500);
 
       this._schedule(900, async () => {
         this._busy = false;

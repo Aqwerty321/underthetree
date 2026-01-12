@@ -20,10 +20,11 @@ function transitionOpacity(el, to, ms, easing) {
 }
 
 export class GiftOverlay {
-  constructor({ parent, config, runtime, onOpenGift, onMoreGifts, onBackHome, onWriteWish, initialMuted, onMuteChange }) {
+  constructor({ parent, config, runtime, sfx, onOpenGift, onMoreGifts, onBackHome, onWriteWish, initialMuted, onMuteChange }) {
     this.parent = parent;
     this.config = config;
     this.runtime = runtime;
+    this.sfx = sfx;
 
     this.onOpenGift = onOpenGift;
     this.onMoreGifts = onMoreGifts;
@@ -35,6 +36,7 @@ export class GiftOverlay {
 
     this._giftEndedPromise = null;
     this._giftPlayToken = 0;
+    this._giftLidTimeoutId = null;
 
     this.backdrop = document.createElement('div');
     this.backdrop.className = 'utt-gift-ui';
@@ -305,9 +307,22 @@ export class GiftOverlay {
     // After ended, we wait a paint and lock the final look using the static overlay.
     this._giftEndedPromise = this._waitForGiftEnded({ playToken });
 
+    // Cancel any prior scheduled SFX from older plays.
+    if (this._giftLidTimeoutId) {
+      window.clearTimeout(this._giftLidTimeoutId);
+      this._giftLidTimeoutId = null;
+    }
+
     try {
       const p = this.giftVideo.play();
       if (p && typeof p.then === 'function') await p;
+
+      // SFX timing: play gift_lid_off.mp3 at 2.25s into gift_open.webm.
+      // Use a token guard so replays don't double-fire.
+      this._giftLidTimeoutId = window.setTimeout(() => {
+        if (playToken !== this._giftPlayToken) return;
+        this.sfx?.playGiftLidOff?.();
+      }, 2250);
     } catch {
       // If play fails, fall back to static open frame.
       this.setPreviewImage(this.config.assets.giftOverlay.giftOpenStatic);
@@ -387,6 +402,11 @@ export class GiftOverlay {
   destroy() {
     window.removeEventListener('keydown', this._onKeyDown);
     // (No click-outside handler; avoids accidental UI reset.)
+
+    if (this._giftLidTimeoutId) {
+      window.clearTimeout(this._giftLidTimeoutId);
+      this._giftLidTimeoutId = null;
+    }
 
     try {
       this.giftVideo?.pause();
