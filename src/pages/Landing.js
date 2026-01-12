@@ -3,7 +3,7 @@
 
 import { config } from '../config.js';
 import { loadManifest, loadGiftSceneTextures } from '../utils/assetLoader.js';
-import { withTimeout } from '../utils/syncUtils.js';
+import { wait, withTimeout } from '../utils/syncUtils.js';
 import { HeroRenderer } from '../scene/HeroRenderer.js';
 import { GiftParallaxRenderer } from '../three/GiftParallaxRenderer.js';
 import { Soundscape } from '../audio/Soundscape.js';
@@ -99,8 +99,9 @@ function transitionOpacity(el, to, ms, easing) {
 }
 
 function ensureBottomLoader(parent) {
+  const startedAt = performance.now();
   const wrap = document.createElement('div');
-  wrap.className = 'utt-loading utt-visible';
+  wrap.className = 'utt-loading utt-loader utt-fancy utt-visible';
   wrap.style.opacity = '1';
 
   const bar = document.createElement('div');
@@ -122,6 +123,7 @@ function ensureBottomLoader(parent) {
 
   return {
     el: wrap,
+    startedAt,
     setProgress(p) {
       const x = clamp(p ?? 0, 0, 1);
       fill.style.transform = `scaleX(${x})`;
@@ -132,6 +134,15 @@ function ensureBottomLoader(parent) {
     },
     setShimmer(enabled) {
       wrap.classList.toggle('utt-shimmer', Boolean(enabled));
+    },
+    async removeWithMinDuration(minMs = 2000) {
+      try {
+        const elapsed = performance.now() - startedAt;
+        if (elapsed < minMs) await wait(minMs - elapsed);
+      } catch {
+        // ignore
+      }
+      wrap.remove();
     },
     remove() {
       wrap.remove();
@@ -625,7 +636,7 @@ export async function mountLanding() {
       } finally {
         // Always remove loader even if something stalls.
         try {
-          loader.remove();
+          await loader.removeWithMinDuration(2000);
         } catch {
           // ignore
         }
@@ -651,88 +662,19 @@ export async function mountLanding() {
           onMoreGifts: async () => {
             if (runtime.state !== 'reveal') return;
 
-            // 1) Ask Toolhouse agent (linked to Supabase) to create a new gift + open record.
-            // The agent is expected to perform the CRUD operations using the Toolhouse→Supabase linker.
-            const user_id = getOrCreateAnonUserId();
-
-            let client_op_id = '';
+            // Close the reward overlay and return to the closed gift state.
             try {
-              client_op_id = crypto.randomUUID();
-            } catch {
-              client_op_id = `op_${Date.now()}_${Math.random().toString(16).slice(2)}`;
-            }
-
-            let lastSeenId = null;
-            try {
-              lastSeenId = await fetchLatestGiftOpenId({ user_id, supabaseClient });
+              await rewardOverlay?.close?.();
             } catch {
               // ignore
             }
 
             giftOverlay.setDisabled(true);
-            toast.show('Looking for more gifts…');
-
-            // Start the DB write now, but do not allow it to stall the UX for long.
-            const opened = await withTimeout(
-              Promise.resolve(requestGiftOpen({ user_id, client_op_id, timeoutMs: 9000 })),
-              9500,
-              'open_gift_timeout'
-            ).catch(() => null);
-
-            // 2) Replay the full gift opening animation.
             runtime.state = 'giftOverlayShown';
 
-            // startGiftOpenFlow is triggered by GiftOverlay's onOpenGift callback during replay.
-            // We already created the gift open record above, and we want to keep the UI disabled
-            // until we show the reward, so suppress duplicate work.
-            skipNextGiftAgentRequest = true;
-            skipNextGiftRewardOverlay = true;
-            await giftOverlay.replayGiftOpen();
-
-            // 3) After animation completes (reveal), show the reward immediately.
-            try {
-              await waitForRuntimeState(runtime, 'reveal', 25000);
-
-              // Show container immediately; update as soon as we have data.
-              await rewardOverlay?.show?.({ loading: true });
-
-              // Preferred: show from RPC/agent return (fast, reliable).
-              if (opened && typeof opened === 'object' && (opened.title || opened.description || opened.open_id || opened.gift_id)) {
-                rewardOverlay?.update?.({
-                  title: opened.title || 'gift',
-                  description: opened.description || null,
-                  meta: opened.meta || null,
-                  opened_at: opened.opened_at || null,
-                  open_id: opened.open_id || null,
-                  gift_id: opened.gift_id || null,
-                  client_op_id,
-                  reason: opened.reason || null,
-                  show_debug: false
-                });
-                if (opened.title || opened.description) return;
-              }
-
-              // Fallback: short poll to enrich, but never block the celebration.
-              const gift =
-                (await waitForNewGiftByClientOpId({ client_op_id, supabaseClient, timeoutMs: 4000 }).catch(() => null)) ||
-                (await waitForNewGift({ user_id, supabaseClient, lastSeenId, timeoutMs: 4000 }).catch(() => null));
-
-              rewardOverlay?.update?.({
-                title: gift?.title || 'gift',
-                description: gift?.description || null,
-                meta: gift?.meta || null,
-                opened_at: gift?.opened_at || null,
-                open_id: gift?.open_id || null,
-                gift_id: gift?.gift_id || null,
-                client_op_id,
-                reason: gift?.reason || null,
-                show_debug: false
-              });
-            } catch {
-              // Best-effort: no reward.
-            } finally {
-              giftOverlay.setDisabled(false);
-            }
+            // Reset without auto-opening; user must click "Open Gift" again.
+            await giftOverlay.replayGiftOpenWithOptions({ autoOpen: false });
+            giftOverlay.setDisabled(false);
           },
           onWriteWish: async () => {
             await wishModal?.open();
@@ -796,16 +738,43 @@ export async function mountLanding() {
           ? waitForNewGiftByClientOpId({ client_op_id, supabaseClient, timeoutMs: 12000 }).catch(() => null)
           : Promise.resolve(null);
 
-      // Show the reward container early while the gift is opening.
-      if (!skipRewardOverlay) {
-        rewardOverlay?.show?.({ loading: true }).catch(() => {});
-      }
+      let didStartRewardConfetti = false;
 
-      const showRewardFromResult = async ({ opened, assumeVisible = false }) => {
-        if (!assumeVisible) {
-          // Always show a celebratory container immediately; update when data arrives.
-          await rewardOverlay?.show?.({ loading: true });
+      const startRewardConfetti = async () => {
+        if (didStartRewardConfetti) return;
+        didStartRewardConfetti = true;
+
+        videoLayers =
+          videoLayers ??
+          new VideoLayerManager({
+            parent: document.body,
+            config,
+            runtime,
+            giftRenderer,
+            className: 'utt-video-layers utt-confetti-front'
+          });
+
+        try {
+          const untilGiftEnded = giftOverlay?.waitForGiftEnded?.() ?? Promise.resolve();
+          await videoLayers.playConfettiUntil({
+            untilPromise: untilGiftEnded,
+            playbackRateStart: 1.0,
+            playbackRateEnd: 0.5
+          });
+        } catch {
+          // ignore
         }
+
+        try {
+          await videoLayers.fadeOutConfetti();
+        } catch {
+          // ignore
+        }
+      };
+
+      const showRewardFromResult = async ({ opened }) => {
+        // Show the celebratory container at reveal; update when data arrives.
+        await rewardOverlay?.show?.({ loading: true });
 
         // Preferred: show from RPC/agent return (fast, reliable).
         if (opened && typeof opened === 'object' && (opened.title || opened.description || opened.open_id || opened.gift_id)) {
@@ -820,8 +789,11 @@ export async function mountLanding() {
             reason: opened.reason || null,
             show_debug: false
           });
-          // If we still don't have a real title, try a short enrich poll.
-          if (opened.title || opened.description) return;
+          // Start confetti when the reward card shows the item.
+          if (opened.title || opened.description) {
+            startRewardConfetti();
+            return;
+          }
         }
 
         // Fallback: short poll to enrich, but never block the celebration.
@@ -841,6 +813,8 @@ export async function mountLanding() {
           reason: gift?.reason || null,
           show_debug: false
         });
+
+        startRewardConfetti();
       };
 
       if (runtime.prefersReducedMotion) {
@@ -856,7 +830,7 @@ export async function mountLanding() {
               enrichGiftPromise,
               new Promise((r) => setTimeout(() => r(null), 2500))
             ]);
-            await showRewardFromResult({ opened: opened?.title || opened?.description ? opened : enrich || opened, assumeVisible: true });
+            await showRewardFromResult({ opened: opened?.title || opened?.description ? opened : enrich || opened });
           } catch {
             // Best-effort only.
           }
@@ -866,29 +840,9 @@ export async function mountLanding() {
         return;
       }
 
-      videoLayers =
-        videoLayers ??
-        new VideoLayerManager({
-          parent: giftOverlay.getConfettiMount(),
-          config,
-          runtime,
-          giftRenderer,
-          className: 'utt-video-layers'
-        });
-
       try {
-        const giftVideoEl = giftOverlay.getGiftVideoElement();
-        const confettiEnded = await videoLayers.playConfettiSyncedToGift({ giftVideoEl });
-
-        runtime.state = 'confettiPlaying';
-
-        // Reveal once both: gift has reached its final frame, and confetti has ended.
-        await Promise.all([
-          giftOverlay.waitForGiftEnded().catch(() => {}),
-          confettiEnded.catch(() => {})
-        ]);
-
-        await videoLayers.fadeOutConfetti();
+        // Wait for the gift opening animation to finish before revealing.
+        await giftOverlay.waitForGiftEnded().catch(() => {});
 
         runtime.state = 'reveal';
         giftOverlay.showReveal();
@@ -900,7 +854,7 @@ export async function mountLanding() {
               enrichGiftPromise,
               new Promise((r) => setTimeout(() => r(null), 2500))
             ]);
-            await showRewardFromResult({ opened: opened?.title || opened?.description ? opened : enrich || opened, assumeVisible: true });
+            await showRewardFromResult({ opened: opened?.title || opened?.description ? opened : enrich || opened });
           } catch {
             // Best-effort: no reward.
           }
@@ -920,7 +874,7 @@ export async function mountLanding() {
               enrichGiftPromise,
               new Promise((r) => setTimeout(() => r(null), 2500))
             ]);
-            await showRewardFromResult({ opened: opened?.title || opened?.description ? opened : enrich || opened, assumeVisible: true });
+            await showRewardFromResult({ opened: opened?.title || opened?.description ? opened : enrich || opened });
           } catch {
             // Best-effort only.
           }
@@ -1079,7 +1033,7 @@ export async function mountLanding() {
       } finally {
         // Always remove loader even on failure.
         try {
-          loader.remove();
+          await loader.removeWithMinDuration(2000);
         } catch {
           // ignore
         }

@@ -249,10 +249,33 @@ export class GiftOverlay {
   }
 
   async replayGiftOpen() {
-    // Used by the "More gifts" flow: return to idle then replay the open animation.
+    return this.replayGiftOpenWithOptions({ autoOpen: true });
+  }
+
+  async replayGiftOpenWithOptions({ autoOpen = true } = {}) {
+    // Used by the "More gifts" flow.
+    // When autoOpen=false, this simply returns to the closed state and waits for a user click.
     if (this._mode === 'reveal') {
       await this.hideReveal();
     }
+
+    // Ensure the closed frame is visible.
+    await this._prepareGiftVideo();
+    try {
+      this.giftOpenOverlay.style.opacity = '0';
+      this.giftVideo.classList.remove('utt-hidden');
+      this.giftImg.classList.add('utt-hidden');
+      this.giftVideo.pause();
+      this.giftVideo.currentTime = 0;
+    } catch {
+      // ignore
+    }
+
+    if (!autoOpen) {
+      this.setDisabled(false);
+      return;
+    }
+
     await this._handleOpenGift();
   }
 

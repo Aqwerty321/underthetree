@@ -127,7 +127,7 @@ export class TransitionController {
     if (this.loading) return;
 
     const wrap = document.createElement('div');
-    wrap.className = 'utt-loading';
+    wrap.className = 'utt-loading utt-loader utt-fancy';
 
     const bar = document.createElement('div');
     bar.className = 'utt-bar';
@@ -228,7 +228,7 @@ export class TransitionController {
     // Begin loading progress loop.
     this._resetProgress();
     const start = nowMs();
-    const minLoadMs = reduced ? 200 : 600;
+    const minLoadMs = 2000;
 
     // Listen for readiness/progress *before* calling play() so we don't miss early events.
     let canPlay = video.readyState >= 3;

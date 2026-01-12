@@ -156,6 +156,212 @@ export class VideoLayerManager {
     return Promise.race([endedPromise, confettiTimeoutFallback()]);
   }
 
+  // Standalone confetti: plays immediately, intended to be triggered when the reward card appears.
+  // Supports a linear playbackRate ramp (e.g., 1.0 -> 0.5 over the duration).
+  async playConfetti({ playbackRateStart = 1.0, playbackRateEnd = 0.5 } = {}) {
+    const reduced = Boolean(this.runtime.prefersReducedMotion);
+    if (reduced) return Promise.resolve();
+
+    this._confettiStarted = false;
+
+    const confettiUrl = this.config.assets?.ui?.effects?.confettiBurst;
+    if (!confettiUrl) throw new Error('Missing config.assets.ui.effects.confettiBurst');
+
+    this._confetti = this._confetti ?? makeVideo({ url: confettiUrl, className: 'utt-alpha-video utt-confetti' });
+
+    // Ensure initial opacity state.
+    this._confetti.style.opacity = '0';
+
+    // Mount for playback.
+    this._mountLayers();
+
+    // Start from the beginning.
+    try {
+      this._confetti.currentTime = 0;
+    } catch {
+      // ignore
+    }
+
+    try {
+      this._confetti.playbackRate = Number(playbackRateStart) || 1.0;
+    } catch {
+      // ignore
+    }
+
+    await this._safePlay(this._confetti);
+    this._confettiStarted = true;
+
+    // Playback rate ramp: linear from start -> end until the video ends.
+    try {
+      const v = this._confetti;
+      const startRate = Math.max(0.1, Number(playbackRateStart) || 1.0);
+      const endRate = Math.max(0.1, Number(playbackRateEnd) || 0.5);
+      const duration = Number.isFinite(v?.duration) && v.duration > 0 ? v.duration : 6.5;
+
+      const tick = () => {
+        if (!this._confettiStarted || !v) return;
+        if (v.ended) return;
+        const t = clamp01((Number(v.currentTime) || 0) / Math.max(0.001, duration));
+        const r = startRate + (endRate - startRate) * t;
+        try {
+          v.playbackRate = r;
+        } catch {
+          // ignore
+        }
+        requestAnimationFrame(tick);
+      };
+      requestAnimationFrame(tick);
+    } catch {
+      // ignore
+    }
+
+    // Fade confetti in quickly.
+    await transitionOpacity(this._confetti, 1, 220, cubicBezierString('easeOutCubic', this.config));
+
+    const confettiTimeoutFallback = async () => {
+      const d = this._confetti?.duration;
+      const guess = Number.isFinite(d) && d > 0 ? Math.min(d, 8) + 0.5 : 6.5;
+      await wait(guess * 1000);
+      return;
+    };
+
+    const endedPromise = new Promise((resolve) => {
+      const onEnded = () => {
+        this._confetti?.removeEventListener('ended', onEnded);
+        resolve();
+      };
+      this._confetti?.addEventListener('ended', onEnded);
+    });
+
+    return Promise.race([endedPromise, confettiTimeoutFallback()]);
+  }
+
+  // Standalone confetti that persists until an external signal completes (e.g., the gift-open video ended).
+  // If confetti ends before `untilPromise` resolves, it will restart from the beginning.
+  async playConfettiUntil({ untilPromise, playbackRateStart = 1.0, playbackRateEnd = 0.5 } = {}) {
+    const reduced = Boolean(this.runtime.prefersReducedMotion);
+    if (reduced) return Promise.resolve();
+
+    const untilP = Promise.resolve(untilPromise).catch(() => {});
+
+    // If the target is already finished, fall back to a single confetti play.
+    // (Preserves the celebratory moment even if the gift video ended early.)
+    let alreadyDone = false;
+    await Promise.race([
+      untilP.then(() => {
+        alreadyDone = true;
+      }),
+      Promise.resolve()
+    ]);
+    if (alreadyDone) {
+      return this.playConfetti({ playbackRateStart, playbackRateEnd });
+    }
+
+    this._confettiStarted = false;
+
+    const confettiUrl = this.config.assets?.ui?.effects?.confettiBurst;
+    if (!confettiUrl) throw new Error('Missing config.assets.ui.effects.confettiBurst');
+
+    this._confetti = this._confetti ?? makeVideo({ url: confettiUrl, className: 'utt-alpha-video utt-confetti' });
+
+    // Ensure initial opacity state.
+    this._confetti.style.opacity = '0';
+
+    // Mount for playback.
+    this._mountLayers();
+
+    const startOne = async () => {
+      // Restart from the beginning.
+      try {
+        this._confetti.currentTime = 0;
+      } catch {
+        // ignore
+      }
+
+      try {
+        this._confetti.playbackRate = Number(playbackRateStart) || 1.0;
+      } catch {
+        // ignore
+      }
+
+      await this._safePlay(this._confetti);
+    };
+
+    await startOne();
+    this._confettiStarted = true;
+
+    // Playback rate ramp: linear from start -> end until the video ends.
+    try {
+      const v = this._confetti;
+      const startRate = Math.max(0.1, Number(playbackRateStart) || 1.0);
+      const endRate = Math.max(0.1, Number(playbackRateEnd) || 0.5);
+      const duration = Number.isFinite(v?.duration) && v.duration > 0 ? v.duration : 6.5;
+
+      const tick = () => {
+        if (!this._confettiStarted || !v) return;
+        if (v.ended) return;
+        const t = clamp01((Number(v.currentTime) || 0) / Math.max(0.001, duration));
+        const r = startRate + (endRate - startRate) * t;
+        try {
+          v.playbackRate = r;
+        } catch {
+          // ignore
+        }
+        requestAnimationFrame(tick);
+      };
+      requestAnimationFrame(tick);
+    } catch {
+      // ignore
+    }
+
+    // Fade confetti in quickly.
+    await transitionOpacity(this._confetti, 1, 220, cubicBezierString('easeOutCubic', this.config));
+
+    const endedOrTimeoutOnce = () => {
+      const confettiTimeoutFallback = async () => {
+        const d = this._confetti?.duration;
+        const guess = Number.isFinite(d) && d > 0 ? Math.min(d, 8) + 0.5 : 6.5;
+        await wait(guess * 1000);
+        return;
+      };
+
+      const endedPromise = new Promise((resolve) => {
+        const onEnded = () => {
+          this._confetti?.removeEventListener('ended', onEnded);
+          resolve('ended');
+        };
+        this._confetti?.addEventListener('ended', onEnded);
+      });
+
+      return Promise.race([endedPromise, confettiTimeoutFallback().then(() => 'timeout')]);
+    };
+
+    // Loop confetti until the external promise resolves.
+    // If the confetti ends first, restart it.
+    while (true) {
+      const winner = await Promise.race([untilP.then(() => 'until'), endedOrTimeoutOnce()]);
+      if (winner === 'until') break;
+      if (!this._confettiStarted || !this._confetti) break;
+      // If the target is done by the time we reach here, don't restart.
+      let doneNow = false;
+      await Promise.race([
+        untilP.then(() => {
+          doneNow = true;
+        }),
+        Promise.resolve()
+      ]);
+      if (doneNow) break;
+      try {
+        await startOne();
+      } catch {
+        // If restart fails, stop looping and let the caller fade out.
+        break;
+      }
+    }
+
+    return;
+  }
+
   async fadeOutConfetti() {
     const reduced = Boolean(this.runtime.prefersReducedMotion);
     const easing = cubicBezierString('easeOutCubic', this.config);

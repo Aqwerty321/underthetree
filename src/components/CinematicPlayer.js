@@ -160,7 +160,7 @@ export class CinematicPlayer {
     if (this.loading) return;
 
     const wrap = document.createElement('div');
-    wrap.className = 'utt-loading utt-visible utt-shimmer';
+    wrap.className = 'utt-loading utt-loader utt-fancy utt-visible utt-shimmer';
 
     const bar = document.createElement('div');
     bar.className = 'utt-bar';
@@ -236,7 +236,7 @@ export class CinematicPlayer {
     }
 
     const start = performance.now();
-    const minLoadMs = reduced ? 200 : 600;
+    const minLoadMs = 2000;
 
     await new Promise((resolve, reject) => {
       const tick = () => {
