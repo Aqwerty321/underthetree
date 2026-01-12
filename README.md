@@ -1,10 +1,19 @@
-# Under the Tree (landing prototype)
+# Under the Tree
 
-Single-screen landing experience using a **hero color image + matching linear depth map** to drive a subtle parallax shader, with ambient audio and runtime post-processing.
+A cinematic, single-page “gift opening” experience built with Vite + Three.js.
 
-The experience now includes a short **cinematic video** and a second **gift parallax scene** with optional **alpha WebM overlays** (gift opening + confetti).
+Highlights:
 
-This repo is intentionally modular and “open-ended”: it’s meant to be iterated on (future screens/transitions), not treated as a final product.
+- WebGL parallax hero and a second parallax gift scene (color + depth maps)
+- A cinematic interstitial video and an alpha WebM gift-open overlay
+- Confetti overlay that persists until the gift-open video ends
+- Ambient soundscape (Web Audio) + UX SFX (HTMLAudio)
+- Supabase-backed gifting + an offline-friendly “Wish from Santa” flow
+- Toolhouse integration for LLM tasks (validation/payload shaping) and optional server-side DB writes
+
+This repo is intentionally modular: it’s designed to be iterated on (more scenes, transitions, data sources) rather than a one-off prototype.
+
+---
 
 ## Quick start
 
@@ -20,243 +29,257 @@ npm run build
 npm run preview
 ```
 
-## Deploy (GitHub + Vercel)
+---
 
-### 1) Push to GitHub
+## Architecture (high level)
 
-- Ensure `.env*` files are not committed (this repo includes `.gitignore`).
-- Create a new GitHub repo, then from this folder:
-	- `git init`
-	- `git add .`
-	- `git commit -m "Initial commit"`
-	- `git branch -M main`
-	- `git remote add origin <YOUR_GITHUB_REPO_URL>`
-	- `git push -u origin main`
+The app is a single-page UI with three major subsystems: rendering, media (video/audio), and data/AI.
 
-### 2) Import into Vercel
+```text
+Browser (Vite SPA)
+  ├─ Rendering (Three.js)
+  │   ├─ HeroRenderer (hero parallax)
+  │   └─ GiftParallaxRenderer (gift scene parallax + post FX)
+  ├─ Media
+  │   ├─ CinematicPlayer (mp4)
+  │   ├─ GiftOverlay (gift_open.webm)
+  │   ├─ VideoLayerManager (confetti_burst.webm layering + sync)
+  │   ├─ Soundscape (Web Audio ambient loops)
+  │   └─ SfxManager (UI click / fanfare / lid-off)
+  └─ Data + AI
+      ├─ SupabaseClientWrapper (reads + optional writes)
+      ├─ PendingQueue (offline-first retries)
+      └─ ModelClient (Ollama in dev, Toolhouse via server proxy in prod)
 
-- In Vercel: **Add New → Project → Import** your GitHub repo.
-- Framework preset: **Vite**
-- Build command: `npm run build`
-- Output directory: `dist`
+Vercel serverless (optional, for production)
+  ├─ /api/toolhouse-chat   (OpenAI-compatible chat.completions proxy)
+  └─ /api/toolhouse-agent  (Toolhouse Agent proxy; used for server-side writes)
+```
 
-This repo includes `vercel.json` to rewrite all routes to `index.html` (SPA behavior).
+Entry point: [src/pages/Landing.js](src/pages/Landing.js) orchestrates the whole flow.
 
-### 3) Set Vercel environment variables
+---
 
-Add the variables from `.env.example` in Vercel Project Settings → Environment Variables.
+## Runtime flow (gift experience)
 
-Important:
+1) **Start gesture**
 
-- Vercel cannot reach Ollama running on your laptop. For production you must either:
-	- Configure `VITE_TOOLHOUSE_*` (recommended), or
-	- Set `VITE_OLLAMA_URL` to a hosted Ollama-compatible endpoint that the browser can reach.
+- The landing screen requires an explicit Start click (autoplay compliance).
+- Asset preloading occurs with progress feedback.
+
+2) **Hero scene**
+
+- A fullscreen quad uses the hero color texture + depth map to create subtle parallax.
+- Post-processing is optional and tunable.
+
+3) **Cinematic interstitial**
+
+- [src/components/CinematicPlayer.js](src/components/CinematicPlayer.js) plays the cinematic video with a minimum loader duration.
+
+4) **Gift scene + gift UI**
+
+- Gift parallax textures load on black, then crossfade into the gift scene.
+- [src/ui/GiftOverlay.js](src/ui/GiftOverlay.js) presents the “Open Gift” UI.
+
+5) **Open gift + reward moment**
+
+- `gift_open.webm` plays inside the GiftOverlay.
+- Confetti starts at the configured offset and persists until the gift-open video ends.
+- A reward overlay shows the selected gift title/description (“You got <item>!”).
+
+---
+
+## Audio system
+
+There are two audio layers:
+
+### Ambient (Web Audio)
+
+- [src/audio/Soundscape.js](src/audio/Soundscape.js) loads two looping buffers (room + fire).
+- Starts only after Start and respects mute.
+
+### SFX (HTMLAudio)
+
+- [src/audio/SfxManager.js](src/audio/SfxManager.js) pre-warms small audio pools to reduce click-to-sound latency.
+- Triggers:
+	- `click.mp3`: plays on every UI `<button>` click (global event delegation)
+	- `fanfare.mp3`: plays when `confetti_burst.webm` starts
+	- `gift_lid_off.mp3`: plays at 2.25s into `gift_open.webm` with a 0.5s fade-in ramp
+
+Mute behavior:
+
+- The “Sound off” toggle mutes both the ambient soundscape and SFX.
+
+---
+
+## Data + reliability
+
+### Supabase gifting
+
+- The app can read from Supabase to pick a public gift.
+- If the DB request fails, the UX falls back to a local gift list so the experience never hard-breaks.
+
+### Wishes (offline-first)
+
+The wish flow is designed to succeed under flaky networks and strict permissions:
+
+- Wishes are submitted through an offline-capable queue (persisted in `localStorage`).
+- A model step validates and sanitizes text before creating a DB payload.
+- The DB write is attempted via a server-side Toolhouse Agent (recommended) and can fall back to a client-side insert if configured to allow it.
+
+Local storage keys:
+
+- `underthetree.pendingQueue` — offline queue
+- `underthetree.anonUserId` — anonymous user identifier (no auth required)
+- `underthetree.telemetry` — minimal telemetry buffer (no raw wish text)
+
+---
+
+## Toolhouse integration (accurate wiring)
+
+This project uses Toolhouse in two ways:
+
+1) **LLM operations (validation + payload generation)**
+
+- Implemented in [src/model/modelClient.js](src/model/modelClient.js) + [src/model/providers.js](src/model/providers.js).
+- In production, Toolhouse is called through a Vercel proxy so API keys never ship to the browser:
+	- [api/toolhouse-chat.js](api/toolhouse-chat.js)
+
+2) **Server-side DB writes via Toolhouse Agent**
+
+- Wishes can be written using a Toolhouse Agent through:
+	- [api/toolhouse-agent.js](api/toolhouse-agent.js)
+	- [src/toolhouse/wishWriter.js](src/toolhouse/wishWriter.js)
+
+Important note:
+
+- If your Supabase RLS policies do not allow anonymous inserts/reads, you will not be able to reliably write/confirm wishes directly from the browser.
+- The server-side agent path exists to support deployments where you want “no user auth” UX but still need controlled server-side writes.
+
+---
+
+## Debugging
+
+Open with debug tools enabled:
+
+`http://localhost:5173/?debug=true`
+
+Includes:
+
+- Performance/visual tuning panel (parallax/blur/post-processing)
+- Wish flow monitor overlay (queue status + telemetry events)
+
+---
 
 ## Assets (do not rename)
 
-All current content is driven by the existing files under `public/assets`:
+All content is driven by files under `public/assets`.
+
+Audio:
 
 - `audio/fire_cackle_loop.mp3`
 - `audio/room_ambience_loop.mp3`
+- `audio/click.mp3`
+- `audio/fanfare.mp3`
+- `audio/gift_lid_off.mp3`
+
+Hero:
+
 - `visuals/hero/color/hero_bg_2k.webp`
 - `visuals/hero/color/hero_bg_4k.webp`
 - `visuals/hero/depth/hero_depth_2k_16bit.png`
 - `visuals/hero/depth/hero_depth_4k_16bit.png`
+
+UI:
+
 - `visuals/ui/glass_noise.jpg`
 
-Additional required assets for the cinematic + gift scene:
+Gift scene:
 
-- Cinematic:
-	- `video/cinematic.mp4`
-- Gift scene parallax:
-	- `visuals/gifts_scene/color/gifts_bg_2k.png`
-	- `visuals/gifts_scene/color/gifts_bg_4k.png`
-	- `visuals/gifts_scene/depth/gifts_depth_2k_16bit.png`
-	- `visuals/gifts_scene/depth/gifts_depth_4k_16bit.png`
-- Gift UI overlay images:
-	- `visuals/gifts_scene/gift_overlay/gift_closed.png`
-	- `visuals/gifts_scene/gift_overlay/gift_open_static.png`
-- Gift effects (alpha video overlays):
-	- `visuals/gifts_scene/gift_overlay/gift_open.webm`
-	- `ui/effects/confetti_burst.webm`
+- `visuals/gifts_scene/color/gifts_bg_2k.png`
+- `visuals/gifts_scene/color/gifts_bg_4k.png`
+- `visuals/gifts_scene/depth/gifts_depth_2k_16bit.png`
+- `visuals/gifts_scene/depth/gifts_depth_4k_16bit.png`
 
-Depth maps are treated as **linear normalized depth in [0..1]** (0 = near, 1 = far), as exported from Blender.
+Gift overlay:
 
-Alpha WebM notes:
+- `visuals/gifts_scene/gift_overlay/gift_closed.png`
+- `visuals/gifts_scene/gift_overlay/gift_open_static.png`
+- `visuals/gifts_scene/gift_overlay/gift_open.webm`
 
-- The confetti overlay expects an alpha-capable codec (commonly VP9 with alpha). Browser/driver support varies.
-- The code prefers WebGL composition via `VideoTexture` when possible; it has a DOM/CSS fallback layer for cases where WebGL video texturing is not viable.
+Effects:
 
-## Resolution switching (2k vs 4k)
+- `ui/effects/confetti_burst.webm`
 
-Decision logic (default):
+Depth maps are treated as linear normalized depth in [0..1] (0 = near, 1 = far), as exported from Blender.
 
-- If `devicePixelRatio >= 2` **and** `innerWidth >= 1440` → use **4k** color + depth
-- Else → use **2k**
+---
 
-Override options:
+## Environment variables
 
-- Runtime: add `?debug=true` and toggle **use4k** (reload required)
-- Code: set `config.flags.use4k` in [src/config.js](src/config.js)
+Copy `.env.example` to `.env.local`.
 
-While assets load, a CSS placeholder shows `hero_bg_2k.webp` with a blur filter.
-
-## Accessibility + autoplay rules
-
-- The experience requires an explicit user gesture via the **Start** button.
-- Audio starts only after Start (autoplay compliance).
-- `prefers-reduced-motion` disables parallax and automated motion, and defaults audio to off.
-- A **Sound off** toggle is provided and persisted to `localStorage`.
-
-## Debug panel
-
-Open: `http://localhost:5173/?debug=true`
-
-Required controls included:
-
-- `parallaxStrength` (slider)
-- `blurRadiusPct` (slider)
-- `noiseStrength`, `noiseScale`, `noiseSpeed`
-- `use4k` toggle (reload required)
-- `postProcessing` on/off
-- `simulateLowPower` toggle
-
-Note: gift-scene-specific debug controls are not exposed yet; most tuning is in [src/config.js](src/config.js).
-
-## Architecture
-
-Suggested modular structure (implemented):
-
-- [src/entry.js](src/entry.js) — bootstrap, start gesture, lifecycle
-- [src/config.js](src/config.js) — **single config object** (all tuning params)
-- [src/utils/assetLoader.js](src/utils/assetLoader.js) — promise loader + progress
-- [src/scene/HeroRenderer.js](src/scene/HeroRenderer.js) — fullscreen quad + shader + composer
-- [src/postprocess/BlurPass.js](src/postprocess/BlurPass.js) — separable blur w/ noise+depth modulation
-- [src/postprocess/BloomPass.js](src/postprocess/BloomPass.js) — UnrealBloom wrapper
-- [src/audio/Soundscape.js](src/audio/Soundscape.js) — Web Audio preload + crossfade + modulation
-- [src/ui/StartOverlay.js](src/ui/StartOverlay.js) — accessible CTA + progress + mute
-- [src/ui/DebugPanel.js](src/ui/DebugPanel.js) — `?debug=true` QA panel
-
-Additional modules for the cinematic + gift flow:
-
-- [src/pages/Landing.js](src/pages/Landing.js) — orchestrates the full flow (hero → cinematic → gift → back home)
-- [src/components/CinematicPlayer.js](src/components/CinematicPlayer.js) — cinematic video player (loader + fades + cleanup)
-- [src/three/GiftParallaxRenderer.js](src/three/GiftParallaxRenderer.js) — gift scene fullscreen quad + postprocessing + optional video overlays
-- [src/video/VideoLayerManager.js](src/video/VideoLayerManager.js) — manages `gift_open` + `confetti` playback and sync (+1.0s)
-- [src/ui/GiftOverlay.js](src/ui/GiftOverlay.js) — gift UI overlay (Open Gift → reveal actions)
-- [src/utils/syncUtils.js](src/utils/syncUtils.js) — video time sync helpers (rvfc + polling fallback)
-
-## Wish from Santa (offline-friendly)
-
-This repo includes a Supabase-backed “Wish from Santa” flow with an offline queue and a provider-agnostic model client.
-
-### UX
-
-- Open the gift, then in the reveal actions click **Write a wish**.
-- A glass modal opens titled **“Write a wish for Santa”**.
-- On **Send Wish**:
-	- Inputs disable immediately.
-	- A modal header progress bar appears (8px):
-		- Streaming model calls show determinate progress (by chunk count).
-		- Non-streaming falls back to an indeterminate bar with timed status messages.
-	- If the DB write fails or you are offline: the wish is saved locally and queued for background sync.
-	- If the model call fails (Ollama not running, timeout, or no fallback configured): the wish is saved locally and queued; it will run the model + DB write later.
-
-### Local storage (data safety)
-
-- `underthetree.pendingQueue` — persistent offline queue (NOT secure storage; payload is minimal, no secret tokens).
-- `underthetree.anonUserId` — opaque identifier used when not authenticated.
-- `underthetree.telemetry` — minimal local telemetry buffer (no raw wish text).
-
-### Model providers
-
-The model client is deterministic and strict JSON-only:
-
-- Dev default: local Ollama (`llama3.2:3b`)
-- Production (recommended): Toolhouse (OpenAI-compatible endpoint)
-
-Provider selection behavior:
-
-- In dev, Ollama is attempted first (via the Vite proxy `/ollama`).
-- In production, if `VITE_TOOLHOUSE_URL` + `VITE_TOOLHOUSE_API_KEY` are set, Toolhouse is attempted first.
-- In production, Toolhouse is called via a Vercel serverless proxy (`/api/toolhouse-chat`) so API keys are NOT shipped to the browser.
-- There is at most one fallback attempt per request.
-
-#### Local Ollama (runs on your laptop)
-
-- Install Ollama and make sure the service is running.
-- Pull the model once:
-	- `ollama pull llama3.2:3b`
-
-By default, the app calls Ollama through the Vite dev proxy at `/ollama` (so the browser doesn’t hit CORS issues). If you want to bypass the proxy, set `VITE_OLLAMA_URL=http://localhost:11434`.
-
-### Environment variables
-
-Create a `.env.local` with:
+Client (browser) variables:
 
 - `VITE_SUPABASE_URL`
 - `VITE_SUPABASE_ANON_KEY`
-- `VITE_OLLAMA_URL` (optional; if unset the app uses the Vite proxy `/ollama` → `http://localhost:11434`)
-- `VITE_OLLAMA_MODEL` (optional, default `llama3.2:3b`)
-- `TOOLHOUSE_URL` (Toolhouse chat completions endpoint URL; OpenAI-compatible `chat.completions`)
-- `TOOLHOUSE_API_KEY`
-- `TOOLHOUSE_MODEL` (optional)
+- `VITE_TELEMETRY_ENDPOINT` (optional)
 
-Dev-only (not recommended for production):
+Dev-only model options:
 
-- `VITE_TOOLHOUSE_URL`
-- `VITE_TOOLHOUSE_API_KEY`
-- `VITE_TOOLHOUSE_MODEL`
+- `VITE_OLLAMA_URL` (optional; default uses the Vite proxy `/ollama`)
+- `VITE_OLLAMA_MODEL` (optional)
+- `VITE_TOOLHOUSE_URL` / `VITE_TOOLHOUSE_API_KEY` / `VITE_TOOLHOUSE_MODEL` (optional; dev-only direct Toolhouse calls)
 
-### Toolhouse → Supabase linker (bounty mode)
+Production (server-side on Vercel):
 
-This project can delegate Supabase CRUD operations to a Toolhouse agent (connected via the Toolhouse↔Supabase linker/MCP server).
+- `TOOLHOUSE_URL` / `TOOLHOUSE_API_KEY` / `TOOLHOUSE_MODEL` (for `/api/toolhouse-chat`)
+- `TOOLHOUSE_AGENT_URL` / `TOOLHOUSE_AGENT_API_KEY` (for `/api/toolhouse-agent`)
 
-How it works:
+---
 
-- The frontend calls `/api/toolhouse-agent` with a structured command string.
-- Toolhouse executes the DB operations against Supabase.
-- The frontend then polls Supabase tables and displays updates.
+## Deploy (GitHub + Vercel)
 
-Required env vars (Vercel / server-side):
+1) Push to GitHub
 
-- `TOOLHOUSE_AGENT_URL` (example: `https://agents.toolhouse.ai/<AGENT_ID>`)
-- `TOOLHOUSE_AGENT_API_KEY` (if your agent is private)
+- Ensure `.env*` files are not committed.
 
-Gift demo:
+2) Import into Vercel
 
-- Click **More gifts** → we ask the Toolhouse agent to create a new gift + open record, replay the gift animation, then show a centered overlay: “You got an <item>”.
-- `VITE_TELEMETRY_ENDPOINT` (optional; if unset telemetry is buffered locally only)
+- Framework preset: Vite
+- Build command: `npm run build`
+- Output directory: `dist`
 
-### Supabase schema / server-side requirements
+This repo includes [vercel.json](vercel.json) to rewrite all routes to `index.html` (SPA behavior).
+
+3) Configure environment variables
+
+- Add values from `.env.example` into Vercel Project Settings → Environment Variables.
+
+Important:
+
+- Vercel cannot reach Ollama running on your laptop. For production, either use Toolhouse via `/api/toolhouse-chat` or host an Ollama-compatible endpoint.
+
+---
+
+## Supabase schema
 
 SQL migration files live in:
 
 - [supabase/migrations/001_init.sql](supabase/migrations/001_init.sql)
 
-It creates tables `gifts`, `user_gift_opens`, and `wishes` (including `moderated`/`moderated_at` and an optional `synced` boolean for client bookkeeping), plus RLS policies and a simple “5 per hour” rate-limit trigger.
-
-Moderation is stubbed as an Edge Function:
+There is also a stub Edge Function intended for moderation workflows:
 
 - [supabase/functions/moderate-wish/index.ts](supabase/functions/moderate-wish/index.ts)
 
-You must wire moderation so that public wishes are not exposed until approved (`moderated=true`).
+---
 
-## Shader uniforms (what to tune)
+## Roadmap / planned improvements
 
-The parallax shader lives in [src/scene/HeroRenderer.js](src/scene/HeroRenderer.js) and uses:
-
-- `tColor` — sRGB hero texture
-- `tDepth` — linear normalized depth texture
-- `tNoise` — glass noise grayscale
-- `uMouse` — normalized mouse in [-1, 1] (Y inverted)
-- `uParallaxStrength` — base strength (device + interaction focus)
-- `uScreenScale` — baseline scale (spec default 0.04)
-- `uNoiseStrength`, `uNoiseScale`, `uNoiseSpeed` — glass refraction controls
-- `uMaxOffsetPx` — safety clamp (spec default 60)
-- `uDepthEdgeBlendRange` — blends back to unshifted UV at depth edges
-- `uWarmup` — 0→1 warmup after Start
-- `uOpacity` — fade-in after Start
+- Authenticated users (optional) for stronger RLS + cross-device persistence
+- Server-side “confirm wish exists” endpoint for guaranteed write confirmation even under strict RLS
+- Real moderation pipeline (Edge Function + review UI)
+- Bundle splitting / perf work for the main JS chunk
 
 Notes:
 
