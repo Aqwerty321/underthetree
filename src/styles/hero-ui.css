@@ -6,6 +6,9 @@
 :root {
   --utt-easeOutQuad: cubic-bezier(.25,.46,.45,.94);
   --utt-easeOutCubic: cubic-bezier(.215,.61,.355,1);
+
+  /* Set by JS (see src/entry.js). Defaults to 1. */
+  --utt-ui-scale: 1;
 }
 
 .utt-ui-layer {
@@ -20,7 +23,7 @@
   position: absolute;
   left: 50%;
   top: 50%;
-  transform: translate(-50%, -50%) translateY(-4px);
+  transform: translate(-50%, -50%) translateY(-4px) scale(var(--utt-ui-scale));
   width: min(86vw, 720px);
   max-width: 720px;
   padding: 28px 30px;
@@ -40,7 +43,7 @@
 .utt-hero-card.utt-hero-hidden {
   opacity: 0;
   pointer-events: none;
-  transform: translate(-50%, -50%) translateY(10px);
+  transform: translate(-50%, -50%) translateY(10px) scale(var(--utt-ui-scale));
 }
 
 /* Backdrop-filter, only when supported */
@@ -289,6 +292,10 @@
   justify-content: flex-start;
   position: relative;
   overflow: visible;
+
+  /* Universal UI scaling (target feel: 2560x1600). */
+  transform: scale(var(--utt-ui-scale));
+  transform-origin: center;
 }
 
 .utt-gift-glass {
@@ -536,7 +543,8 @@
   position: absolute;
   inset: 0;
   background: linear-gradient(90deg, transparent, rgba(255,255,255,0.22), transparent);
-  transform: translateX(-70%);
+  transform: translateX(-50%) scale(var(--utt-ui-scale));
+  transform-origin: center bottom;
   opacity: 0.55;
 }
 
@@ -595,6 +603,9 @@
   text-align: center;
   overflow: hidden;
   position: relative;
+
+  transform: scale(var(--utt-ui-scale));
+  transform-origin: center;
 }
 
 @keyframes uttRewardGlint {
@@ -703,6 +714,9 @@
   backdrop-filter: blur(18px);
   box-shadow: 0 20px 70px rgba(0,0,0,0.40);
   overflow: hidden;
+
+  transform: scale(var(--utt-ui-scale));
+  transform-origin: center;
 }
 
 /* Debug-only: wish flow monitor */
@@ -917,6 +931,7 @@
   letter-spacing: 0.08em;
   text-transform: uppercase;
   opacity: 0.65;
+  -webkit-user-select: none;
   user-select: none;
   white-space: nowrap;
 }
@@ -932,6 +947,9 @@
   left: 14px;
   bottom: 14px;
   z-index: 55;
+
+  transform: scale(var(--utt-ui-scale));
+  transform-origin: left bottom;
 }
 
 .utt-pending-label {

@@ -265,8 +265,11 @@ export class GiftOverlay {
     await this._prepareGiftVideo();
     try {
       this.giftOpenOverlay.style.opacity = '0';
+      this.giftOpenOverlay.style.transition = '';
       this.giftVideo.classList.remove('utt-hidden');
       this.giftImg.classList.add('utt-hidden');
+      this.giftVideo.style.transition = '';
+      this.giftVideo.style.opacity = '1';
       this.giftVideo.pause();
       this.giftVideo.currentTime = 0;
     } catch {
@@ -293,8 +296,11 @@ export class GiftOverlay {
 
     // Reset any end-state overlay.
     this.giftOpenOverlay.style.opacity = '0';
+    this.giftOpenOverlay.style.transition = '';
     this.giftVideo.classList.remove('utt-hidden');
     this.giftImg.classList.add('utt-hidden');
+    this.giftVideo.style.transition = '';
+    this.giftVideo.style.opacity = '1';
 
     // Start from the first frame (closed gift).
     try {
@@ -357,6 +363,11 @@ export class GiftOverlay {
     try {
       this.giftOpenOverlay.style.transition = `opacity 200ms ${this.config.easing.easeOutCubic}`;
       this.giftOpenOverlay.style.opacity = '1';
+
+      // Hide the decoded final video frame behind the overlay to avoid any
+      // visible size/aspect mismatch between the WebM and the static PNG.
+      this.giftVideo.style.transition = `opacity 200ms ${this.config.easing.easeOutCubic}`;
+      this.giftVideo.style.opacity = '0';
     } catch {
       // ignore
     }
