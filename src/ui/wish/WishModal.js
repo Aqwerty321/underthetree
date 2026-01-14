@@ -32,6 +32,24 @@ function makeUuid() {
   }
 }
 
+function isToolhouseNotConfiguredError(err) {
+  const msg = String(err?.message || err || '');
+  return msg.includes('NOT_CONFIGURED') || msg.includes('toolhouse_agent_not_configured');
+}
+
+function isLikelyToolhouseDownError(err) {
+  const msg = String(err?.message || err || '');
+  return (
+    msg.toLowerCase().includes('toolhouse') ||
+    msg.includes('HTTP 5') ||
+    msg.includes('HTTP 501') ||
+    msg.includes('HTTP 502') ||
+    msg.includes('HTTP 503') ||
+    msg.includes('timeout') ||
+    msg.includes('NETWORK')
+  );
+}
+
 export class WishModal {
   constructor({ parent, config, runtime, modelClient, supabaseClient, queue, telemetry, toast }) {
     this.parent = parent;
@@ -285,28 +303,40 @@ export class WishModal {
           if (!text.trim()) throw new Error('non_retryable:empty_text');
           if (!client_op_id) throw new Error('non_retryable:missing_client_op_id');
 
-          const v = (await this.modelClient.request('VALIDATE_WISH', { text }, { timeoutMs: 10000, stream: false, clientOpId: client_op_id })).result;
-          if (!v.ok || !v.valid) {
-            const reason = Array.isArray(v.reasons) && v.reasons.length ? v.reasons.join('; ') : 'invalid';
-            throw new Error(`non_retryable:invalid_wish:${reason}`);
-          }
+          let wishText = text;
+          let dbPayload = {
+            id: client_op_id,
+            user_id,
+            text: wishText,
+            is_public,
+            tags: [],
+            summary: null
+          };
 
-          const wishText = v.sanitized_text || text;
-          const created = (await this.modelClient.request(
-            'CREATE_WISH_PAYLOAD',
-            { user_id, text: wishText, is_public },
-            { timeoutMs: 10000, stream: false, clientOpId: client_op_id }
-          )).result;
-
-          if (!created.ok) {
-            const code = created.error_code || 'MODEL_ERROR';
-            const msg = created.error_msg || 'Model rejected payload';
-            throw new Error(`non_retryable:${code}:${msg}`);
+          // Model is best-effort only; if Toolhouse chat is down, still submit.
+          try {
+            const v = (await this.modelClient.request(
+              'VALIDATE_WISH',
+              { text },
+              { timeoutMs: 4000, stream: false, clientOpId: client_op_id }
+            )).result;
+            if (v?.ok && v?.valid) {
+              wishText = v.sanitized_text || text;
+              const created = (await this.modelClient.request(
+                'CREATE_WISH_PAYLOAD',
+                { user_id, text: wishText, is_public },
+                { timeoutMs: 4000, stream: false, clientOpId: client_op_id }
+              )).result;
+              if (created?.ok && created.db_payload) dbPayload = { ...created.db_payload, id: client_op_id };
+            }
+          } catch {
+            // ignore
           }
 
           // Primary path: Toolhouse Agent performs the DB write server-side.
+          // If Toolhouse doesn't respond quickly, fall back to direct Supabase insert.
           try {
-            await submitWishToToolhouseAgent({ db_payload: created.db_payload, client_op_id, timeoutMs: 15000 });
+            await submitWishToToolhouseAgent({ db_payload: dbPayload, client_op_id, timeoutMs: 4000 });
 
             // Best-effort: store a wish-driven gift candidate.
             try {
@@ -326,9 +356,8 @@ export class WishModal {
             }
             return;
           } catch (e) {
-            const msg = String(e?.message || e || 'toolhouse_failed');
-            if (msg.includes('NOT_CONFIGURED') || msg.includes('toolhouse_agent_not_configured')) {
-              await this.supabaseClient.createWishFromQueue({ ...created.db_payload, id: client_op_id, synced: true });
+            if (isToolhouseNotConfiguredError(e) || isLikelyToolhouseDownError(e)) {
+              await this.supabaseClient.createWishFromQueue({ ...dbPayload, id: client_op_id, synced: true });
 
               try {
                 const found = await this.supabaseClient
@@ -398,14 +427,13 @@ export class WishModal {
       this._busy = false;
       this._setDisabled(false);
       this._setProgress({ mode: 'hidden' });
-      this.status.textContent = 'Saved locally — will sync when online';
+      this.status.textContent = 'Wish queued — will send when online';
       this.retryRow.classList.remove('utt-hidden');
       return;
     }
 
     const startMs = performance.now();
     const minBusyMs = 4000;
-    const totalTimeoutMs = 20000;
 
     // Progress messaging rules.
     this._setProgress({ mode: 'indeterminate' });
@@ -419,86 +447,55 @@ export class WishModal {
 
     this._schedule(4500, () => {
       if (!this._busy) return;
-      this.status.textContent = 'This may take longer — we’ll save locally and sync.';
-    });
-
-    // Total cap: after 20s, save locally and exit.
-    const capId = this._schedule(totalTimeoutMs, () => {
-      if (!this._busy) return;
-      this._busy = false;
-      this._setDisabled(false);
-      this._setProgress({ mode: 'hidden' });
-      this.status.textContent = 'Saved locally — will sync when online';
-
-      // Model may be offline/slow: enqueue the intent and replay later.
-      enqueueSubmitWish();
-      this.retryRow.classList.remove('utt-hidden');
+      this.status.textContent = 'Still working…';
     });
 
     try {
-      // Deterministic model operations: validate then create DB payload.
-      const validateRes = await this.modelClient.request(
-        'VALIDATE_WISH',
-        { text: sanitized },
-        {
-          timeoutMs: 10000,
-          stream: false,
-          clientOpId: client_op_id
-        }
-      );
+      // Model is best-effort; if Toolhouse chat is down (e.g. /api/toolhouse-chat 501),
+      // fall back to a minimal DB payload and keep going.
+      let wishText = sanitized;
+      let modelOut = { ok: true, db_payload: { id: client_op_id, user_id, text: wishText, is_public, tags: [], summary: null } };
 
-      const v = validateRes.result;
-      if (!v.ok || !v.valid) {
-        this._clearTimers();
-        this._busy = false;
-        this._setDisabled(false);
-        this._setProgress({ mode: 'hidden' });
-        this.status.textContent = '';
-        this._showInlineError(v.reasons?.length ? v.reasons : ['Something went wrong — try again']);
-        return;
-      }
+      try {
+        const validateRes = await this.modelClient.request(
+          'VALIDATE_WISH',
+          { text: sanitized },
+          {
+            timeoutMs: 4000,
+            stream: false,
+            clientOpId: client_op_id
+          }
+        );
 
-      const wishText = v.sanitized_text || sanitized;
+        const v = validateRes.result;
+        if (v?.ok && v?.valid) {
+          wishText = v.sanitized_text || sanitized;
 
-      // Use streaming for CREATE_WISH_PAYLOAD when available so we can show determinate progress.
-      let gotAnyProgress = false;
-      const createRes = await this.modelClient.request(
-        'CREATE_WISH_PAYLOAD',
-        { user_id, text: wishText, is_public },
-        {
-          timeoutMs: 10000,
-          stream: true,
-          clientOpId: client_op_id,
-          onProgress: ({ chunks }) => {
-            gotAnyProgress = true;
-            // Determinate progress mapped to chunk count.
-            const p = Math.min(0.9, (Number(chunks || 0) / 28) || 0);
-            this._setProgress({ mode: 'determinate', value: p });
+          // Use streaming when available, but keep it short.
+          let gotAnyProgress = false;
+          const createRes = await this.modelClient.request(
+            'CREATE_WISH_PAYLOAD',
+            { user_id, text: wishText, is_public },
+            {
+              timeoutMs: 4000,
+              stream: true,
+              clientOpId: client_op_id,
+              onProgress: ({ chunks }) => {
+                gotAnyProgress = true;
+                const p = Math.min(0.9, (Number(chunks || 0) / 28) || 0);
+                this._setProgress({ mode: 'determinate', value: p });
+              }
+            }
+          );
+
+          if (!gotAnyProgress) this._setProgress({ mode: 'indeterminate' });
+          if (createRes?.result?.ok && createRes.result.db_payload) {
+            modelOut = createRes.result;
+            modelOut.db_payload = { ...modelOut.db_payload, id: client_op_id };
           }
         }
-      );
-
-      // If fallback happened and it took >3s, show the required status.
-      const elapsed = performance.now() - startMs;
-      if (createRes.meta?.fallback && elapsed > 3000) {
-        this.status.textContent = 'Processing — using network model';
-      }
-
-      if (!gotAnyProgress) {
-        // No streaming delivered: stay indeterminate.
-        this._setProgress({ mode: 'indeterminate' });
-      }
-
-      const modelOut = createRes.result;
-      if (!modelOut.ok) {
-        this._clearTimers();
-        this._busy = false;
-        this._setDisabled(false);
-        this._setProgress({ mode: 'hidden' });
-        this.status.textContent = '';
-        const msg = modelOut.error_msg || 'Something went wrong — try again';
-        this._showInlineError([msg]);
-        return;
+      } catch {
+        // ignore
       }
 
       // DB write: if it fails, enqueue and inform.
@@ -506,7 +503,7 @@ export class WishModal {
         let deliveredViaToolhouseAgent = false;
         try {
           this.telemetry?.emit?.('wish_toolhouse_write_start', { client_op_id, is_public });
-          await submitWishToToolhouseAgent({ db_payload: modelOut.db_payload, client_op_id, timeoutMs: 15000 });
+          await submitWishToToolhouseAgent({ db_payload: modelOut.db_payload, client_op_id, timeoutMs: 4000 });
           deliveredViaToolhouseAgent = true;
 
           // Best-effort confirmation (may fail under RLS/no-auth).
@@ -525,7 +522,8 @@ export class WishModal {
           }
         } catch (e) {
           const msg = String(e?.message || e || 'toolhouse_failed');
-          if (msg.includes('NOT_CONFIGURED') || msg.includes('toolhouse_agent_not_configured')) {
+          // If Toolhouse is not configured or is down/slow, fall back to direct Supabase insert.
+          if (isToolhouseNotConfiguredError(e) || isLikelyToolhouseDownError(e)) {
             await this.supabaseClient.createWish(modelOut.db_payload, { clientOpId: client_op_id });
 
             const confirm = await this.supabaseClient
@@ -573,6 +571,8 @@ export class WishModal {
 
         if (deliveredViaToolhouseAgent) {
           this.status.textContent = 'Your wish has been delivered to Santa, through our Toolhouse agent';
+        } else {
+          this.status.textContent = 'Your wish has been delivered to Santa';
         }
       } catch (e) {
         const enqueueOp = e?.enqueueOp;
@@ -583,14 +583,14 @@ export class WishModal {
         this._setDisabled(false);
         this._setProgress({ mode: 'hidden' });
         this._setLoading(false);
-        this.status.textContent = 'Saved locally — will sync when online';
+        if (!enqueueOp) enqueueSubmitWish();
+        this.status.textContent = 'Wish queued — will retry automatically';
         this.retryRow.classList.remove('utt-hidden');
         return;
       }
 
       // Success UX.
       this._clearTimers();
-      clearTimeout(capId);
       this._setLoading(false);
       this._setProgress({ mode: 'success' });
       // If we already set a confirmation string above, keep it.
@@ -607,12 +607,11 @@ export class WishModal {
       } catch {
         // Model failure (Ollama down / timeout / Toolhouse not configured): persist locally.
       this._clearTimers();
-      clearTimeout(capId);
       this._busy = false;
       this._setDisabled(false);
       this._setProgress({ mode: 'hidden' });
         enqueueSubmitWish();
-        this.status.textContent = 'Saved locally — will sync when online';
+        this.status.textContent = 'Wish queued — will retry automatically';
         this.retryRow.classList.remove('utt-hidden');
     }
   }
