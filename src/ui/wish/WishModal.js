@@ -92,10 +92,20 @@ export class WishModal {
     this.status.className = 'utt-wish-status';
     this.status.textContent = '';
 
+    this.loadingDots = document.createElement('div');
+    this.loadingDots.className = 'utt-wish-loading-dots utt-hidden';
+    this.loadingDots.setAttribute('aria-hidden', 'true');
+    this.loadingDots.innerHTML = '<span></span><span></span><span></span>';
+
     this.textarea = document.createElement('textarea');
     this.textarea.className = 'utt-wish-textarea';
-    this.textarea.placeholder = 'Type your wish… (max 250 characters)';
+    this.textarea.placeholder = 'Type the gift you want… (max 250 characters)';
     this.textarea.maxLength = 250;
+
+    this.descTextarea = document.createElement('textarea');
+    this.descTextarea.className = 'utt-wish-textarea utt-wish-desc';
+    this.descTextarea.placeholder = 'Optional description (shown if your wish appears as your gift)';
+    this.descTextarea.maxLength = 300;
 
     this.publicRow = document.createElement('label');
     this.publicRow.className = 'utt-wish-public-row';
@@ -148,7 +158,9 @@ export class WishModal {
     this.footer.appendChild(this.retryRow);
 
     this.body.appendChild(this.status);
+    this.body.appendChild(this.loadingDots);
     this.body.appendChild(this.textarea);
+    this.body.appendChild(this.descTextarea);
     this.body.appendChild(this.publicRow);
     this.body.appendChild(this.inlineError);
 
@@ -201,6 +213,7 @@ export class WishModal {
     this._clearTimers();
     this._setDisabled(false);
     this.status.textContent = '';
+    this.loadingDots.classList.add('utt-hidden');
     this.inlineError.textContent = '';
     this.inlineError.classList.add('utt-hidden');
     this.textarea.classList.remove('utt-invalid');
@@ -211,6 +224,7 @@ export class WishModal {
   _setDisabled(disabled) {
     const d = Boolean(disabled);
     this.textarea.disabled = d;
+    this.descTextarea.disabled = d;
     this.publicCheckbox.disabled = d;
     this.sendBtn.disabled = d;
     this.closeBtn.disabled = d;
@@ -247,6 +261,10 @@ export class WishModal {
     this.textarea.classList.add('utt-invalid');
   }
 
+  _setLoading(loading) {
+    this.loadingDots.classList.toggle('utt-hidden', !loading);
+  }
+
   _dismissRetryRow() {
     this.retryRow.classList.add('utt-hidden');
   }
@@ -262,6 +280,7 @@ export class WishModal {
           const text = String(payload?.text || '');
           const is_public = Boolean(payload?.is_public);
           const client_op_id = String(payload?.client_op_id || '');
+          const gift_description = payload?.gift_description != null ? String(payload.gift_description) : '';
 
           if (!text.trim()) throw new Error('non_retryable:empty_text');
           if (!client_op_id) throw new Error('non_retryable:missing_client_op_id');
@@ -288,11 +307,44 @@ export class WishModal {
           // Primary path: Toolhouse Agent performs the DB write server-side.
           try {
             await submitWishToToolhouseAgent({ db_payload: created.db_payload, client_op_id, timeoutMs: 15000 });
+
+            // Best-effort: store a wish-driven gift candidate.
+            try {
+              const found = await this.supabaseClient
+                ?.findGiftByTitleCaseInsensitive?.({ title: wishText, timeoutMs: 2500 })
+                .catch(() => ({ ok: false }));
+              const candidate = {
+                title: String(wishText || '').trim(),
+                description: gift_description || null,
+                supabaseGift: found?.ok ? found.gift : null,
+                created_at: new Date().toISOString(),
+                shown: false
+              };
+              window.localStorage.setItem('underthetree.wishGiftCandidate', JSON.stringify(candidate));
+            } catch {
+              // ignore
+            }
             return;
           } catch (e) {
             const msg = String(e?.message || e || 'toolhouse_failed');
             if (msg.includes('NOT_CONFIGURED') || msg.includes('toolhouse_agent_not_configured')) {
               await this.supabaseClient.createWishFromQueue({ ...created.db_payload, id: client_op_id, synced: true });
+
+              try {
+                const found = await this.supabaseClient
+                  ?.findGiftByTitleCaseInsensitive?.({ title: wishText, timeoutMs: 2500 })
+                  .catch(() => ({ ok: false }));
+                const candidate = {
+                  title: String(wishText || '').trim(),
+                  description: gift_description || null,
+                  supabaseGift: found?.ok ? found.gift : null,
+                  created_at: new Date().toISOString(),
+                  shown: false
+                };
+                window.localStorage.setItem('underthetree.wishGiftCandidate', JSON.stringify(candidate));
+              } catch {
+                // ignore
+              }
               return;
             }
             throw e;
@@ -307,6 +359,8 @@ export class WishModal {
 
     const raw = this.textarea.value;
     const sanitized = sanitizeWishText(raw, { maxLen: 250 });
+    const rawDesc = this.descTextarea.value;
+    const desc = sanitizeWishText(rawDesc, { maxLen: 300 });
 
     if (!sanitized) {
       this._showInlineError(['Wish can\'t be empty.']);
@@ -314,6 +368,7 @@ export class WishModal {
     }
 
     this.textarea.value = sanitized;
+    this.descTextarea.value = desc;
 
     const user_id = getOrCreateAnonUserId();
     const is_public = Boolean(this.publicCheckbox.checked);
@@ -326,6 +381,7 @@ export class WishModal {
           client_op_id,
           user_id,
           text: sanitized,
+          gift_description: desc,
           is_public
         }
       });
@@ -348,11 +404,13 @@ export class WishModal {
     }
 
     const startMs = performance.now();
+    const minBusyMs = 4000;
     const totalTimeoutMs = 20000;
 
     // Progress messaging rules.
     this._setProgress({ mode: 'indeterminate' });
     this.status.textContent = 'Preparing your wish…';
+    this._setLoading(true);
 
     this._schedule(1500, () => {
       if (!this._busy) return;
@@ -445,9 +503,11 @@ export class WishModal {
 
       // DB write: if it fails, enqueue and inform.
       try {
+        let deliveredViaToolhouseAgent = false;
         try {
           this.telemetry?.emit?.('wish_toolhouse_write_start', { client_op_id, is_public });
           await submitWishToToolhouseAgent({ db_payload: modelOut.db_payload, client_op_id, timeoutMs: 15000 });
+          deliveredViaToolhouseAgent = true;
 
           // Best-effort confirmation (may fail under RLS/no-auth).
           const confirm = await this.supabaseClient
@@ -485,6 +545,35 @@ export class WishModal {
             throw e;
           }
         }
+
+        // Best-effort: store a wish-driven gift candidate for later reward injection.
+        try {
+          const title = String(wishText || sanitized).trim();
+          const found = await this.supabaseClient
+            ?.findGiftByTitleCaseInsensitive?.({ title, timeoutMs: 2500 })
+            .catch(() => ({ ok: false }));
+          const candidate = {
+            title,
+            description: desc || null,
+            supabaseGift: found?.ok ? found.gift : null,
+            created_at: new Date().toISOString(),
+            shown: false
+          };
+          window.localStorage.setItem('underthetree.wishGiftCandidate', JSON.stringify(candidate));
+        } catch {
+          // ignore
+        }
+
+        // Ensure the "delivery" moment lasts at least 4 seconds.
+        const elapsed = performance.now() - startMs;
+        if (elapsed < minBusyMs) {
+          this.status.textContent = 'Delivering your wish to Santa…';
+          await wait(minBusyMs - elapsed);
+        }
+
+        if (deliveredViaToolhouseAgent) {
+          this.status.textContent = 'Your wish has been delivered to Santa, through our Toolhouse agent';
+        }
       } catch (e) {
         const enqueueOp = e?.enqueueOp;
         if (enqueueOp) this.queue?.enqueue?.(enqueueOp);
@@ -493,6 +582,7 @@ export class WishModal {
         this._busy = false;
         this._setDisabled(false);
         this._setProgress({ mode: 'hidden' });
+        this._setLoading(false);
         this.status.textContent = 'Saved locally — will sync when online';
         this.retryRow.classList.remove('utt-hidden');
         return;
@@ -501,6 +591,7 @@ export class WishModal {
       // Success UX.
       this._clearTimers();
       clearTimeout(capId);
+      this._setLoading(false);
       this._setProgress({ mode: 'success' });
       // If we already set a confirmation string above, keep it.
       if (!this.status.textContent) this.status.textContent = 'Wish sent!';

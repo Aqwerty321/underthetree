@@ -190,6 +190,94 @@ function safePauseResetVideo(videoEl) {
   }
 }
 
+const WISH_GIFT_STORAGE_KEY = 'underthetree.wishGiftCandidate';
+
+function loadWishGiftCandidate() {
+  try {
+    const raw = window.localStorage.getItem(WISH_GIFT_STORAGE_KEY);
+    if (!raw) return null;
+    const obj = JSON.parse(raw);
+    if (!obj || typeof obj !== 'object') return null;
+    if (obj.shown) return null;
+    if (!obj.title) return null;
+    return obj;
+  } catch {
+    return null;
+  }
+}
+
+function saveWishGiftCandidate(obj) {
+  try {
+    if (!obj) {
+      window.localStorage.removeItem(WISH_GIFT_STORAGE_KEY);
+      return;
+    }
+    window.localStorage.setItem(WISH_GIFT_STORAGE_KEY, JSON.stringify(obj));
+  } catch {
+    // ignore
+  }
+}
+
+async function recordWishGiftCandidate({ title, description, supabaseClient }) {
+  const t = title != null ? String(title).trim() : '';
+  if (!t) return null;
+  const d = description != null ? String(description).trim() : '';
+
+  let found = null;
+  try {
+    found = await supabaseClient?.findGiftByTitleCaseInsensitive?.({ title: t, timeoutMs: 2500 });
+  } catch {
+    found = null;
+  }
+
+  const candidate = {
+    title: t,
+    description: d || null,
+    supabaseGift: found?.ok ? found.gift : null,
+    created_at: new Date().toISOString(),
+    shown: false
+  };
+
+  saveWishGiftCandidate(candidate);
+  return candidate;
+}
+
+function maybeApplyWishGiftToOpened(opened) {
+  const candidate = loadWishGiftCandidate();
+  if (!candidate) return opened;
+
+  // 33% chance to surface the wish as the gift.
+  if (Math.random() > 0.333) return opened;
+
+  const sg = candidate?.supabaseGift;
+  const title = (sg?.title || candidate?.title || opened?.title || 'gift').toString();
+  const description = candidate?.description || sg?.description || opened?.description || null;
+
+  const injected = {
+    ...(opened && typeof opened === 'object' ? opened : {}),
+    title,
+    description,
+    meta: {
+      ...(opened?.meta && typeof opened.meta === 'object' ? opened.meta : {}),
+      ...(sg?.meta && typeof sg.meta === 'object' ? sg.meta : {}),
+      wish_injected: true,
+      wish_created_at: candidate?.created_at || null
+    },
+    gift_id: sg?.id || opened?.gift_id || null,
+    reason: 'wish_injected'
+  };
+
+  // One-time: mark as shown.
+  try {
+    candidate.shown = true;
+    saveWishGiftCandidate(candidate);
+  } catch {
+    // ignore
+  }
+
+  return injected;
+}
+
 export async function mountLanding() {
   const appEl = document.getElementById('app');
   const uiEl = document.getElementById('ui');
@@ -434,6 +522,7 @@ export async function mountLanding() {
             const text = String(payload?.text || '');
             const is_public = Boolean(payload?.is_public);
             const client_op_id = String(payload?.client_op_id || '');
+              const gift_description = payload?.gift_description != null ? String(payload.gift_description) : '';
 
             if (!client_op_id) throw new Error('non_retryable:missing_client_op_id');
 
@@ -467,6 +556,9 @@ export async function mountLanding() {
               telemetry?.emit?.('wish_toolhouse_write_start', { client_op_id, is_public });
               await submitWishToToolhouseAgent({ db_payload: created.db_payload, client_op_id, timeoutMs: 15000 });
 
+              // Record wish-driven gift candidate (best-effort).
+              await recordWishGiftCandidate({ title: sanitized_text, description: gift_description, supabaseClient }).catch(() => null);
+
               // Best-effort: confirm row exists (may be blocked by RLS).
               const confirm = await supabaseClient
                 .waitForWishById({ id: client_op_id, timeoutMs: 4500 })
@@ -484,6 +576,8 @@ export async function mountLanding() {
               const msg = String(e?.message || e || 'toolhouse_failed');
               if (msg.includes('NOT_CONFIGURED') || msg.includes('toolhouse_agent_not_configured')) {
                 await supabaseClient.createWishFromQueue({ ...created.db_payload, id: client_op_id, synced: true });
+
+                await recordWishGiftCandidate({ title: sanitized_text, description: gift_description, supabaseClient }).catch(() => null);
 
                 const confirm = await supabaseClient
                   .waitForWishById({ id: client_op_id, timeoutMs: 4500 })
@@ -734,9 +828,9 @@ export async function mountLanding() {
             giftOverlay.setDisabled(true);
             runtime.state = 'giftOverlayShown';
 
-            // Reset without auto-opening; user must click "Open Gift" again.
-            await giftOverlay.replayGiftOpenWithOptions({ autoOpen: false });
-            giftOverlay.setDisabled(false);
+            // Replay the gift-open flow immediately.
+            // This also gives the wish-driven gift injection a chance to surface on this action.
+            await giftOverlay.replayGiftOpenWithOptions({ autoOpen: true });
           },
           onWriteWish: async () => {
             await wishModal?.open();
@@ -841,19 +935,20 @@ export async function mountLanding() {
 
         // Preferred: show from RPC/agent return (fast, reliable).
         if (opened && typeof opened === 'object' && (opened.title || opened.description || opened.open_id || opened.gift_id)) {
+          const finalOpened = maybeApplyWishGiftToOpened(opened);
           rewardOverlay?.update?.({
-            title: opened.title || 'gift',
-            description: opened.description || null,
-            meta: opened.meta || null,
-            opened_at: opened.opened_at || null,
-            open_id: opened.open_id || null,
-            gift_id: opened.gift_id || null,
+            title: finalOpened.title || 'gift',
+            description: finalOpened.description || null,
+            meta: finalOpened.meta || null,
+            opened_at: finalOpened.opened_at || null,
+            open_id: finalOpened.open_id || null,
+            gift_id: finalOpened.gift_id || null,
             client_op_id,
-            reason: opened.reason || null,
+            reason: finalOpened.reason || null,
             show_debug: false
           });
           // Start confetti when the reward card shows the item.
-          if (opened.title || opened.description) {
+          if (finalOpened.title || finalOpened.description) {
             startRewardConfetti();
             return;
           }
@@ -865,15 +960,17 @@ export async function mountLanding() {
             ? await waitForNewGiftByClientOpId({ client_op_id, supabaseClient, timeoutMs: 4000 }).catch(() => null)
             : null) || (await waitForNewGift({ user_id, supabaseClient, lastSeenId, timeoutMs: 4000 }).catch(() => null));
 
+        const finalGift = maybeApplyWishGiftToOpened(gift || {});
+
         rewardOverlay?.update?.({
-          title: gift?.title || 'gift',
-          description: gift?.description || null,
-          meta: gift?.meta || null,
+          title: finalGift.title || gift?.title || 'gift',
+          description: finalGift.description || gift?.description || null,
+          meta: finalGift.meta || gift?.meta || null,
           opened_at: gift?.opened_at || null,
           open_id: gift?.open_id || null,
-          gift_id: gift?.gift_id || null,
+          gift_id: finalGift.gift_id || gift?.gift_id || null,
           client_op_id,
-          reason: gift?.reason || null,
+          reason: finalGift.reason || gift?.reason || null,
           show_debug: false
         });
 

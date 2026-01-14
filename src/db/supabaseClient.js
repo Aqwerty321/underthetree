@@ -41,6 +41,41 @@ export class SupabaseClientWrapper {
     return Boolean(this.client);
   }
 
+  // Best-effort: find a gift by title using case-insensitive exact match.
+  // Useful for mapping a wish text to an existing catalog item.
+  async findGiftByTitleCaseInsensitive({ title, timeoutMs = 2500 } = {}) {
+    if (!this.client) throw new SupabaseWriteError('Supabase not configured', { code: 'NOT_CONFIGURED' });
+    const t = title != null ? String(title).trim() : '';
+    if (!t) return { ok: false, reason: 'empty_title' };
+
+    const startedAt = Date.now();
+    const remainingMs = () => Math.max(1000, timeoutMs - (Date.now() - startedAt));
+    const raceTimeout = (promise, ms, code) =>
+      Promise.race([
+        promise,
+        new Promise((_, reject) => setTimeout(() => reject(new Error(code || 'timeout')), Math.max(1000, ms)))
+      ]);
+
+    const res = await raceTimeout(
+      this.client.from('gifts').select('id, title, description, meta, public').ilike('title', t).limit(5),
+      remainingMs(),
+      'supabase_find_gift_timeout'
+    );
+
+    if (res?.error) {
+      const code = String(res.error.code || 'SUPABASE_SELECT_FAILED');
+      throw new SupabaseWriteError(res.error.message || 'Supabase select failed', { code, cause: res.error });
+    }
+
+    const rows = Array.isArray(res?.data) ? res.data : [];
+    if (!rows.length) return { ok: false, reason: 'not_found' };
+
+    const lower = t.toLowerCase();
+    const exact = rows.find((r) => typeof r?.title === 'string' && r.title.toLowerCase() === lower) || rows[0];
+    if (!exact) return { ok: false, reason: 'not_found' };
+    return { ok: true, gift: exact };
+  }
+
   // Read-only: pick a random public gift from the catalog.
   // This avoids RPC + insert permissions and is useful as a "proof the DB is connected" path.
   async pickPublicGift({ timeoutMs = 3500 } = {}) {

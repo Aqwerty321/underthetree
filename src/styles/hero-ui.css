@@ -842,6 +842,30 @@
   margin-bottom: 10px;
 }
 
+.utt-wish-loading-dots {
+  display: inline-flex;
+  gap: 6px;
+  margin: 2px 0 10px 2px;
+  opacity: 0.75;
+}
+
+.utt-wish-loading-dots span {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(255, 209, 166, 0.95);
+  transform: translateY(0);
+  animation: uttWishDot 0.9s ease-in-out infinite;
+}
+
+.utt-wish-loading-dots span:nth-child(2) { animation-delay: 0.12s; }
+.utt-wish-loading-dots span:nth-child(3) { animation-delay: 0.24s; }
+
+@keyframes uttWishDot {
+  0%, 100% { transform: translateY(0); opacity: 0.55; }
+  50% { transform: translateY(-4px); opacity: 1; }
+}
+
 .utt-wish-textarea {
   width: 100%;
   min-height: 118px;
@@ -852,6 +876,11 @@
   background: rgba(255,255,255,0.04);
   color: rgba(255,255,255,0.92);
   outline: none;
+}
+
+.utt-wish-textarea.utt-wish-desc {
+  margin-top: 10px;
+  min-height: 80px;
 }
 
 .utt-wish-textarea.utt-invalid {
