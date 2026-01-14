@@ -172,7 +172,12 @@ export class WishModal {
     this.retryRow.appendChild(this.retryBtn);
     this.retryRow.appendChild(this.dismissBtn);
 
+    this.poweredBy = document.createElement('div');
+    this.poweredBy.className = 'utt-wish-poweredby';
+    this.poweredBy.textContent = 'Powered by Toolhouse';
+
     this.footer.appendChild(this.sendBtn);
+    this.footer.appendChild(this.poweredBy);
     this.footer.appendChild(this.retryRow);
 
     this.body.appendChild(this.status);

@@ -911,6 +911,16 @@
   gap: 12px;
 }
 
+.utt-wish-poweredby {
+  margin-left: auto;
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  opacity: 0.65;
+  user-select: none;
+  white-space: nowrap;
+}
+
 .utt-wish-retry-row {
   display: flex;
   gap: 10px;
