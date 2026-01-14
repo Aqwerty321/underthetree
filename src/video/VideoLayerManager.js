@@ -7,6 +7,63 @@ function clamp01(v) {
   return Math.min(1, Math.max(0, v));
 }
 
+function clamp(v, min, max) {
+  return Math.max(min, Math.min(max, v));
+}
+
+function getReferenceUiScale() {
+  // Mirror the UI scaling logic (tuned for 2560x1600).
+  const REF_W = 2560;
+  const REF_H = 1600;
+  const REF_ASPECT = REF_W / REF_H;
+
+  const w = Math.max(320, window.innerWidth || REF_W);
+  const h = Math.max(320, window.innerHeight || REF_H);
+  const effectiveW = Math.min(w, h * REF_ASPECT);
+  const scale = Math.min(effectiveW / REF_W, h / REF_H);
+  return clamp(scale, 0.6, 1);
+}
+
+function applyVideoDownsampleToFullscreenCover(videoEl) {
+  // Reduce fill-rate on smaller viewports by rendering the video at a smaller
+  // layout size and scaling it up to cover. This is a GPU-friendly downsample.
+  if (!videoEl) return;
+
+  const uiScale = getReferenceUiScale();
+  const renderScale = clamp(uiScale + 0.15, 0.85, 1);
+  if (renderScale >= 0.999) {
+    // Reset any previous tuning.
+    try {
+      videoEl.style.inset = '';
+      videoEl.style.left = '';
+      videoEl.style.top = '';
+      videoEl.style.right = '';
+      videoEl.style.bottom = '';
+      videoEl.style.width = '';
+      videoEl.style.height = '';
+      videoEl.style.transform = 'translateZ(0)';
+    } catch {
+      // ignore
+    }
+    return;
+  }
+
+  const pct = `${(renderScale * 100).toFixed(2)}%`;
+  const inv = (1 / renderScale).toFixed(4);
+  try {
+    videoEl.style.inset = 'auto';
+    videoEl.style.left = '50%';
+    videoEl.style.top = '50%';
+    videoEl.style.right = 'auto';
+    videoEl.style.bottom = 'auto';
+    videoEl.style.width = pct;
+    videoEl.style.height = pct;
+    videoEl.style.transform = `translate(-50%, -50%) scale(${inv}) translateZ(0)`;
+  } catch {
+    // ignore
+  }
+}
+
 function cubicBezierString(nameOrString, config) {
   if (!nameOrString) return config.easing.easeOutQuad;
   if (nameOrString.startsWith('cubic-bezier')) return nameOrString;
@@ -99,6 +156,9 @@ export class VideoLayerManager {
 
     this._confetti = this._confetti ?? makeVideo({ url: confettiUrl, className: 'utt-alpha-video utt-confetti' });
 
+    // Performance: downsample rendering on smaller viewports.
+    applyVideoDownsampleToFullscreenCover(this._confetti);
+
     // Ensure initial opacity states.
     this._confetti.style.opacity = '0';
 
@@ -119,6 +179,13 @@ export class VideoLayerManager {
 
     await this._safePlay(this._confetti);
     this._confettiStarted = true;
+
+    // Stable playback speed for smoother decode on slower clients.
+    try {
+      this._confetti.playbackRate = 0.75;
+    } catch {
+      // ignore
+    }
 
     // SFX: fanfare plays when confetti starts.
     this.sfx?.playFanfare?.();
@@ -162,7 +229,7 @@ export class VideoLayerManager {
 
   // Standalone confetti: plays immediately, intended to be triggered when the reward card appears.
   // Supports a linear playbackRate ramp (e.g., 1.0 -> 0.5 over the duration).
-  async playConfetti({ playbackRateStart = 1.0, playbackRateEnd = 0.5 } = {}) {
+  async playConfetti({ playbackRateStart = 0.75, playbackRateEnd = 0.75 } = {}) {
     const reduced = Boolean(this.runtime.prefersReducedMotion);
     if (reduced) return Promise.resolve();
 
@@ -172,6 +239,9 @@ export class VideoLayerManager {
     if (!confettiUrl) throw new Error('Missing config.assets.ui.effects.confettiBurst');
 
     this._confetti = this._confetti ?? makeVideo({ url: confettiUrl, className: 'utt-alpha-video utt-confetti' });
+
+    // Performance: downsample rendering on smaller viewports.
+    applyVideoDownsampleToFullscreenCover(this._confetti);
 
     // Ensure initial opacity state.
     this._confetti.style.opacity = '0';
@@ -199,10 +269,19 @@ export class VideoLayerManager {
     this.sfx?.playFanfare?.();
 
     // Playback rate ramp: linear from start -> end until the video ends.
+    // If start==end, skip the per-frame ramp (reduces main-thread work).
     try {
       const v = this._confetti;
       const startRate = Math.max(0.1, Number(playbackRateStart) || 1.0);
       const endRate = Math.max(0.1, Number(playbackRateEnd) || 0.5);
+
+      if (Math.abs(startRate - endRate) < 0.001) {
+        try {
+          v.playbackRate = startRate;
+        } catch {
+          // ignore
+        }
+      } else {
       const duration = Number.isFinite(v?.duration) && v.duration > 0 ? v.duration : 6.5;
 
       const tick = () => {
@@ -218,6 +297,7 @@ export class VideoLayerManager {
         requestAnimationFrame(tick);
       };
       requestAnimationFrame(tick);
+      }
     } catch {
       // ignore
     }
@@ -245,7 +325,7 @@ export class VideoLayerManager {
 
   // Standalone confetti that persists until an external signal completes (e.g., the gift-open video ended).
   // If confetti ends before `untilPromise` resolves, it will restart from the beginning.
-  async playConfettiUntil({ untilPromise, playbackRateStart = 1.0, playbackRateEnd = 0.5 } = {}) {
+  async playConfettiUntil({ untilPromise, playbackRateStart = 0.75, playbackRateEnd = 0.75 } = {}) {
     const reduced = Boolean(this.runtime.prefersReducedMotion);
     if (reduced) return Promise.resolve();
 
@@ -270,6 +350,9 @@ export class VideoLayerManager {
     if (!confettiUrl) throw new Error('Missing config.assets.ui.effects.confettiBurst');
 
     this._confetti = this._confetti ?? makeVideo({ url: confettiUrl, className: 'utt-alpha-video utt-confetti' });
+
+    // Performance: downsample rendering on smaller viewports.
+    applyVideoDownsampleToFullscreenCover(this._confetti);
 
     let fanfarePlayed = false;
 
@@ -307,10 +390,19 @@ export class VideoLayerManager {
     this._confettiStarted = true;
 
     // Playback rate ramp: linear from start -> end until the video ends.
+    // If start==end, skip the per-frame ramp (reduces main-thread work).
     try {
       const v = this._confetti;
       const startRate = Math.max(0.1, Number(playbackRateStart) || 1.0);
       const endRate = Math.max(0.1, Number(playbackRateEnd) || 0.5);
+
+      if (Math.abs(startRate - endRate) < 0.001) {
+        try {
+          v.playbackRate = startRate;
+        } catch {
+          // ignore
+        }
+      } else {
       const duration = Number.isFinite(v?.duration) && v.duration > 0 ? v.duration : 6.5;
 
       const tick = () => {
@@ -326,6 +418,7 @@ export class VideoLayerManager {
         requestAnimationFrame(tick);
       };
       requestAnimationFrame(tick);
+      }
     } catch {
       // ignore
     }

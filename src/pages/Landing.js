@@ -909,11 +909,11 @@ export async function mountLanding() {
 
         try {
           const untilGiftEnded = giftOverlay?.waitForGiftEnded?.() ?? Promise.resolve();
-          await videoLayers.playConfettiUntil({
-            untilPromise: untilGiftEnded,
-            playbackRateStart: 1.0,
-            playbackRateEnd: 0.5
-          });
+            await videoLayers.playConfettiUntil({
+              untilPromise: untilGiftEnded,
+              playbackRateStart: 0.75,
+              playbackRateEnd: 0.75
+            });
         } catch {
           // ignore
         }

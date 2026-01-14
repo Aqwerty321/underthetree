@@ -298,6 +298,14 @@
   transform-origin: center;
 }
 
+/* Wide viewports (16:9+): allocate more vertical room so the gift preview
+   doesn't get cramped (mirrors the 16:10 2560x1600 tuning). */
+@media (min-aspect-ratio: 16/10) {
+  .utt-gift-card {
+    height: min(72vh, 760px);
+  }
+}
+
 .utt-gift-glass {
   position: absolute;
   inset: 0;
