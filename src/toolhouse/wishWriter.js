@@ -1,7 +1,7 @@
 // src/toolhouse/wishWriter.js
 // Best-effort wish persistence via Toolhouse Agent (server-side write).
 
-import { callToolhouseAgent, ToolhouseAgentError } from './agentClient.js';
+import { callToolhouseAgentPayload, ToolhouseAgentError } from './agentClient.js';
 
 function extractFirstJson(text) {
   const s = String(text || '');
@@ -61,15 +61,15 @@ export async function submitWishToToolhouseAgent({ db_payload, client_op_id, tim
     synced: true
   };
 
-  const message =
-    'Create (or upsert) a row in Supabase table "wishes" using the following JSON record. ' +
-    'Use idempotency on "id" (if the id already exists, do not create a duplicate). ' +
-    'Return ONLY a single JSON object like {"ok":true,"id":"..."} or {"ok":false,"error":"..."}.\n\n' +
-    JSON.stringify(record);
+  // Strict command envelope (preferred): reduces agent ambiguity and avoids UNKNOWN_COMMAND.
+  const payload = {
+    command: 'UPSERT_WISH',
+    record
+  };
 
   let text;
   try {
-    text = await callToolhouseAgent(message, { timeoutMs });
+    text = await callToolhouseAgentPayload(payload, { timeoutMs });
   } catch (e) {
     if (e instanceof ToolhouseAgentError) throw e;
     throw new Error(String(e?.message || e));

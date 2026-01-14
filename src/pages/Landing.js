@@ -554,7 +554,7 @@ export async function mountLanding() {
             // Primary path: Toolhouse Agent performs the DB write server-side (avoids RLS/auth issues).
             try {
               telemetry?.emit?.('wish_toolhouse_write_start', { client_op_id, is_public });
-              await submitWishToToolhouseAgent({ db_payload: created.db_payload, client_op_id, timeoutMs: 15000 });
+              await submitWishToToolhouseAgent({ db_payload: created.db_payload, client_op_id, timeoutMs: 4000 });
 
               // Record wish-driven gift candidate (best-effort).
               await recordWishGiftCandidate({ title: sanitized_text, description: gift_description, supabaseClient }).catch(() => null);
@@ -571,25 +571,21 @@ export async function mountLanding() {
               return;
             } catch (e) {
               telemetry?.emit?.('wish_toolhouse_write_fail', { client_op_id, error: String(e?.message || e || 'error') });
-              // If Toolhouse isn't configured server-side, fall back to client-side insert.
-              // (This may still fail under RLS; in that case the queue will retry/mark failed.)
-              const msg = String(e?.message || e || 'toolhouse_failed');
-              if (msg.includes('NOT_CONFIGURED') || msg.includes('toolhouse_agent_not_configured')) {
-                await supabaseClient.createWishFromQueue({ ...created.db_payload, id: client_op_id, synced: true });
+              // If Toolhouse is down/slow/misconfigured (or returns UNKNOWN_COMMAND), fall back to client-side insert.
+              // If this fails under RLS, the queue will keep it for retry.
+              await supabaseClient.createWishFromQueue({ ...created.db_payload, id: client_op_id, synced: true });
 
-                await recordWishGiftCandidate({ title: sanitized_text, description: gift_description, supabaseClient }).catch(() => null);
+              await recordWishGiftCandidate({ title: sanitized_text, description: gift_description, supabaseClient }).catch(() => null);
 
-                const confirm = await supabaseClient
-                  .waitForWishById({ id: client_op_id, timeoutMs: 4500 })
-                  .catch(() => ({ ok: false, reason: 'error' }));
-                telemetry?.emit?.('wish_supabase_write_ok', {
-                  client_op_id,
-                  confirmed: Boolean(confirm?.ok),
-                  confirm_reason: confirm?.ok ? null : confirm?.reason || null
-                });
-                return;
-              }
-              throw e;
+              const confirm = await supabaseClient
+                .waitForWishById({ id: client_op_id, timeoutMs: 4500 })
+                .catch(() => ({ ok: false, reason: 'error' }));
+              telemetry?.emit?.('wish_supabase_write_ok', {
+                client_op_id,
+                confirmed: Boolean(confirm?.ok),
+                confirm_reason: confirm?.ok ? null : confirm?.reason || null
+              });
+              return;
             }
           }
         }

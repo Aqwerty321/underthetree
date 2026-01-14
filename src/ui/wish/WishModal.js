@@ -522,25 +522,24 @@ export class WishModal {
           }
         } catch (e) {
           const msg = String(e?.message || e || 'toolhouse_failed');
-          // If Toolhouse is not configured or is down/slow, fall back to direct Supabase insert.
-          if (isToolhouseNotConfiguredError(e) || isLikelyToolhouseDownError(e)) {
-            await this.supabaseClient.createWish(modelOut.db_payload, { clientOpId: client_op_id });
 
-            const confirm = await this.supabaseClient
-              .waitForWishById({ id: client_op_id, timeoutMs: 3500 })
-              .catch(() => ({ ok: false, reason: 'error' }));
-            this.telemetry?.emit?.('wish_supabase_write_ok', {
-              client_op_id,
-              confirmed: Boolean(confirm?.ok),
-              confirm_reason: confirm?.ok ? null : confirm?.reason || null
-            });
+          // Toolhouse can be down OR return non-executable results (e.g. UNKNOWN_COMMAND).
+          // In all those cases, fall back to a direct Supabase write.
+          this.telemetry?.emit?.('wish_toolhouse_write_fail', { client_op_id, error: msg });
 
-            if (confirm?.ok) {
-              this.status.textContent = 'Wish recorded ✓';
-            }
-          } else {
-            this.telemetry?.emit?.('wish_toolhouse_write_fail', { client_op_id, error: msg });
-            throw e;
+          await this.supabaseClient.createWish(modelOut.db_payload, { clientOpId: client_op_id });
+
+          const confirm = await this.supabaseClient
+            .waitForWishById({ id: client_op_id, timeoutMs: 3500 })
+            .catch(() => ({ ok: false, reason: 'error' }));
+          this.telemetry?.emit?.('wish_supabase_write_ok', {
+            client_op_id,
+            confirmed: Boolean(confirm?.ok),
+            confirm_reason: confirm?.ok ? null : confirm?.reason || null
+          });
+
+          if (confirm?.ok) {
+            this.status.textContent = 'Wish recorded ✓';
           }
         }
 
