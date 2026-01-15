@@ -730,7 +730,7 @@
   box-shadow: 0 20px 70px rgba(0,0,0,0.40);
   overflow: hidden;
 
-  transform: scale(var(--utt-ui-scale));
+  transform: scale(calc(var(--utt-ui-scale) * 1.5));
   transform-origin: center;
 }
 
